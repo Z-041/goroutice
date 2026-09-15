@@ -75,6 +75,9 @@ go build -o bin/server ./cmd/server
 
 服务默认监听 `http://localhost:8080`。首次启动时若库中还没有管理员，会用 `BLOG_BOOTSTRAP_ADMIN_PASSWORD`（环境变量或 `.env`）创建；该变量未设置则拒绝启动，以免用空口令建出管理员。
 
+> 直接使用 Release 里的 `server.exe` 时，`config.yaml` 与 `.env` 都按「可执行文件所在目录 → 当前工作目录」查找，把两个文件放在 exe 同目录即可双击运行。
+> 日志同时写到 stderr 与 exe 同目录的 `logs/server.log`——Windows 上双击运行时控制台窗口会随进程退出立即关闭，启动失败只有这个文件能留下线索。
+
 ### 4. 验证
 
 ```bash

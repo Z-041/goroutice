@@ -140,3 +140,38 @@ func TestLoadEnvFileMissing(t *testing.T) {
 		t.Error("expected loaded=false for a missing file")
 	}
 }
+
+// TestResolvePathFindsWorkingDirectory 验证工作目录下的 config.yaml 能被找到。
+// 可执行文件目录优先，而测试二进制所在的目录里不会有 config.yaml，因此这里必然命中回退分支。
+func TestResolvePathFindsWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	want := filepath.Join(dir, configName)
+	if err := os.WriteFile(want, []byte(minimalConfig), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	t.Chdir(dir)
+
+	// 用 SameFile 比对而非字符串：Windows 上 Getwd 与 TempDir 的路径大小写/短名形式可能不同。
+	wantInfo, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("stat written config: %v", err)
+	}
+	got := ResolvePath()
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("ResolvePath() = %q, stat: %v", got, err)
+	}
+	if !os.SameFile(wantInfo, gotInfo) {
+		t.Errorf("ResolvePath() = %q, want the config.yaml in the working directory", got)
+	}
+}
+
+// TestResolvePathMissingReturnsAbsoluteCandidate 验证两处都找不到配置时返回绝对路径，
+// 让报错信息直接指出该把文件放到哪，而不是一句 `open config.yaml` 让人无从下手。
+func TestResolvePathMissingReturnsAbsoluteCandidate(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	if got := ResolvePath(); !filepath.IsAbs(got) {
+		t.Errorf("ResolvePath() = %q, want an absolute path", got)
+	}
+}

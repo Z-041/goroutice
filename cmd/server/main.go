@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"syscall"
 	"time"
@@ -78,6 +80,9 @@ func resolveVersion() string {
 }
 
 func main() {
+	closeLog := setupLogging()
+	defer closeLog()
+
 	version = resolveVersion()
 	cfg := loadConfig()
 	db, fulltext := initDatabase(cfg)
@@ -113,9 +118,46 @@ type app struct {
 // tokenCleanupInterval 是过期令牌的清理周期。
 const tokenCleanupInterval = time.Hour
 
+// logDirName 是日志目录名，与可执行文件同级。
+const logDirName = "logs"
+
+// logFileName 是服务端日志文件名。
+const logFileName = "server.log"
+
+// setupLogging 让日志同时写到 stderr 与可执行文件同级的 logs/server.log，返回关闭日志文件的函数。
+//
+// 只写 stderr 在 Windows 上等于没有日志：双击运行时控制台窗口随进程退出立刻关闭，启动期错误
+// （找不到配置、连不上库）一闪而过，磁盘上也不留任何痕迹，事后根本无从排查。
+// 落盘失败不阻断启动——日志写不出来总比程序起不来好，此时降级为只写 stderr 并说明原因。
+func setupLogging() func() {
+	file, err := openLogFile()
+	if err != nil {
+		slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+		slog.Warn("logging to stderr only", "err", err)
+		return func() {}
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, file), nil)))
+	slog.Info("logging to file", "path", file.Name())
+	return func() { _ = file.Close() }
+}
+
+// openLogFile 打开可执行文件同级的日志文件，目录不存在时创建。
+func openLogFile() (*os.File, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	logDir := filepath.Join(filepath.Dir(exePath), logDirName)
+	if err := os.MkdirAll(logDir, 0o750); err != nil {
+		return nil, err
+	}
+	//nolint:gosec // 路径由可执行文件位置推导，非外部输入
+	return os.OpenFile(filepath.Join(logDir, logFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+}
+
 // loadConfig 加载配置文件并校验 JWT 密钥强度，失败时终止启动。
 func loadConfig() *config.Config {
-	cfg, err := config.Load("config.yaml")
+	cfg, err := config.Load(config.ResolvePath())
 	if err != nil {
 		slog.Error("load config", "err", err)
 		os.Exit(1)

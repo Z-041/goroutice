@@ -15,10 +15,7 @@ const dotEnvName = ".env"
 
 // loadDotEnv 把 .env 中的键值注入进程环境变量，供 viper 的 BLOG_ 前缀覆盖使用。
 //
-// 查找顺序（取第一个存在的文件）：
-//  1. 可执行文件所在目录：自更新会替换二进制但不改变其位置，生产部署把 .env 放在 exe 旁最稳；
-//  2. 当前工作目录：`go run` 的二进制在临时目录，此时回退到仓库根目录。
-//
+// 按 searchDirs 的顺序取第一个存在的文件（见该函数的说明）。
 // 已存在的环境变量优先，不会被文件覆盖，因此「系统环境变量 > .env > config.yaml > 内置默认」。
 func loadDotEnv() {
 	for _, path := range dotEnvPaths() {
@@ -34,17 +31,31 @@ func loadDotEnv() {
 	}
 }
 
-// dotEnvPaths 返回候选项环境变量文件路径。
-func dotEnvPaths() []string {
-	paths := make([]string, 0, 2)
+// searchDirs 返回查找配置文件与 .env 的候选目录。
+//
+// 顺序为「可执行文件所在目录 → 当前工作目录」：
+//  1. 可执行文件所在目录在前：自更新会替换二进制但不改变其位置，生产部署把配置放在 exe 旁最稳；
+//  2. 当前工作目录作为回退：`go run` 的二进制在临时目录里，此时配置只在仓库根目录。
+func searchDirs() []string {
+	dirs := make([]string, 0, 2)
 	if exePath, err := os.Executable(); err == nil {
 		if resolved, resolveErr := filepath.EvalSymlinks(exePath); resolveErr == nil {
 			exePath = resolved
 		}
-		paths = append(paths, filepath.Join(filepath.Dir(exePath), dotEnvName))
+		dirs = append(dirs, filepath.Dir(exePath))
 	}
 	if cwd, err := os.Getwd(); err == nil {
-		paths = append(paths, filepath.Join(cwd, dotEnvName))
+		dirs = append(dirs, cwd)
+	}
+	return dirs
+}
+
+// dotEnvPaths 返回候选 .env 路径。
+func dotEnvPaths() []string {
+	dirs := searchDirs()
+	paths := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		paths = append(paths, filepath.Join(dir, dotEnvName))
 	}
 	return paths
 }

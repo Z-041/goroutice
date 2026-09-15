@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -141,6 +143,40 @@ type ArticleConfig struct {
 	// ViewDedupMinutes 是浏览量去重窗口（分钟）：同一来源在窗口内重复访问同一篇文章只计一次。
 	// 设为 0 使用内置默认值（30 分钟）。
 	ViewDedupMinutes int `mapstructure:"view_dedup_minutes"`
+}
+
+// configName 是配置文件名。
+const configName = "config.yaml"
+
+// configPaths 返回候选配置文件路径，目录顺序与 .env 一致（见 searchDirs）。
+func configPaths() []string {
+	dirs := searchDirs()
+	paths := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		paths = append(paths, filepath.Join(dir, configName))
+	}
+	return paths
+}
+
+// ResolvePath 返回实际要加载的配置文件路径：取第一个存在的候选文件，返回绝对路径。
+//
+// 一个都不存在时返回最后一个候选（当前工作目录），这样报错信息会直接指出用户该把文件放到哪，
+// 而不是抛出一句相对路径的 `open config.yaml: ...`。
+//
+// 之所以要按目录查找而不是直接用相对路径：Windows 上双击运行时工作目录恰好是 exe 所在目录，
+// 但通过快捷方式、计划任务或服务启动时工作目录可能是别处，只认工作目录会让「配置就在 exe 旁」
+// 也起不来，而失败信息一闪而过，用户根本不知道发生了什么。
+func ResolvePath() string {
+	candidates := configPaths()
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	if len(candidates) > 0 {
+		return candidates[len(candidates)-1]
+	}
+	return configName
 }
 
 // Load 从指定配置文件加载配置。
