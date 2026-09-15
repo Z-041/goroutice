@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -27,12 +28,57 @@ import (
 	"gorm.io/gorm"
 )
 
+// devVersion 表示「本机构建，没有注入版本号」。
+const devVersion = "dev"
+
 // version 是当前二进制版本，唯一源头为 git tag，由 CI 通过 -ldflags 注入：
 //
 //	go build -ldflags "-X main.version=v1.2.3" -o bin/server ./cmd/server
-var version = "dev"
+var version = devVersion
+
+// shortRevisionLen 是回退版本号里保留的提交哈希长度，与 git 默认缩写一致。
+const shortRevisionLen = 7
+
+// resolveVersion 返回用于展示的版本号：优先用注入的 tag，没有时回退到编译器写入的
+// VCS 信息，拼成 dev+<短提交>（工作区有未提交改动时追加 -dirty）。
+//
+// 之所以要回退：本地 go build / go run 不会注入版本，管理端「当前版本」就只剩一个
+// 无法追溯的 dev——线上出问题时，连是哪个提交构建的都查不到。
+// 回退值刻意保持非语义化，不用 0.0.0-<commit>：后者会被自动更新当成比任何发布版都旧的
+// 版本，从而把本地构建悄悄替换成发布版。非语义化版本会让自动更新自动停用。
+func resolveVersion() string {
+	if version != devVersion {
+		return version
+	}
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return devVersion
+	}
+	var revision string
+	var dirty bool
+	for _, setting := range info.Settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = setting.Value
+		case "vcs.modified":
+			dirty = setting.Value == "true"
+		}
+	}
+	if revision == "" {
+		// 构建时关了 VCS 采集（-buildvcs=false）或在仓库外构建，没有可回退的信息。
+		return devVersion
+	}
+	if len(revision) > shortRevisionLen {
+		revision = revision[:shortRevisionLen]
+	}
+	if dirty {
+		return devVersion + "+" + revision + "-dirty"
+	}
+	return devVersion + "+" + revision
+}
 
 func main() {
+	version = resolveVersion()
 	cfg := loadConfig()
 	db, fulltext := initDatabase(cfg)
 	enforcer := initEnforcer(db)

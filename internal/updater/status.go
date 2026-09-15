@@ -5,6 +5,8 @@ import "time"
 // Status 是 Updater 的运行状态快照，用于向管理端展示更新提示。
 type Status struct {
 	// Enabled 表示自动更新是否处于启用状态。
+	// 配置开启但版本不可比较（非语义化，如本机构建的 dev）时同样为 false：这种版本下
+	// 更新永远不会生效，如实报 false 才不会让管理端把它显示成「已是最新」。
 	Enabled bool
 	// CurrentVersion 是当前二进制版本。
 	CurrentVersion string
@@ -18,7 +20,8 @@ type Status struct {
 	Source SourceKind
 	// LastCheckedAt 是最近一次检查的时间，尚未检查过时为零值。
 	LastCheckedAt time.Time
-	// LastError 是最近一次检查或升级的错误信息，成功时为空。
+	// LastError 是最近一次检查或升级的错误信息，成功时为空；
+	// 未启用（Enabled=false）时承载停用原因，便于管理端说明为什么没有更新。
 	LastError string
 }
 

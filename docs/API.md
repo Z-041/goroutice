@@ -1331,16 +1331,18 @@ Authorization: Bearer <access_token>
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `enabled` | bool | 自动更新是否启用；`false` 时仅 `current_version` 有意义 |
-| `current_version` | string | 当前二进制版本（构建时注入，非配置项） |
+| `enabled` | bool | 自动更新是否启用；`false` 时仅 `current_version` 与 `last_error` 有意义 |
+| `current_version` | string | 当前二进制版本（构建时注入，非配置项）。CI 构建为注入的 git tag，如 `v1.2.0`；未注入时回退为 `dev+<短提交>` |
 | `update_available` | bool | 是否发现更高版本 |
 | `latest_version` | string | 可用新版本号，无可用更新时字段缺失 |
 | `release_url` | string | 新版本 Release 页面地址，无可用更新时字段缺失 |
 | `source` | string | 命中更新的来源：`github` 或 `gitee`，无可用更新时字段缺失 |
 | `last_checked_at` | string | 最近一次检查时间，尚未检查过时字段缺失 |
-| `last_error` | string | 最近一次检查或升级的错误信息，正常时字段缺失 |
+| `last_error` | string | 最近一次检查或升级的错误信息，正常时字段缺失；`enabled=false` 时承载停用原因 |
 
 > `last_error` 非空表示最近一次检查失败（与 `update_available` 独立），此时 `update_available` 仍保留上一次成功检查的结果。
+>
+> 当前版本不是合法语义化版本（如 `dev`、`dev+674b364`）时，`enabled` 为 `false`、`last_error` 为停用原因，且不会再有检查发生（后台不轮询，本接口也不会刷新状态）。
 
 ### POST `/api/v1/admin/updater/check`
 
@@ -1532,8 +1534,8 @@ Authorization: Bearer <access_token>
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `enabled` | bool | 自动更新是否启用 |
-| `current_version` | string | 当前二进制版本 |
+| `enabled` | bool | 自动更新是否启用；版本不可比较时为 `false` |
+| `current_version` | string | 当前二进制版本（无注入时回退为 `dev+<短提交>`） |
 | `update_available` | bool | 是否发现更高版本 |
 | `latest_version` | string | 可用新版本号（`omitempty`） |
 | `release_url` | string | 新版本 Release 页面地址（`omitempty`） |

@@ -133,6 +133,10 @@ func New(cfg Config) (*Updater, error) {
 		status: Status{Enabled: true, CurrentVersion: cfg.CurrentVersion},
 	}
 	if _, err := parseVersion(cfg.CurrentVersion); err != nil {
+		// 版本不可比较时更新永远不会发生（见 Check），因此必须如实报「未启用」：
+		// 否则管理端会把它渲染成「已是最新」，让人以为刚检查过且确实没有新版本。
+		u.status.Enabled = false
+		u.status.LastError = fmt.Sprintf("current version %q is not semver; auto update is disabled", cfg.CurrentVersion)
 		u.log.Warn("current version is not semver; auto update is disabled", "version", cfg.CurrentVersion)
 	}
 	return u, nil
@@ -189,6 +193,11 @@ func withDefaults(cfg Config) Config {
 // Run 阻塞轮询：立即检查一次，随后按 Interval 周期检查，直到 ctx 结束或完成一次交接升级。
 // 单次失败只记录日志，不会中断轮询。
 func (u *Updater) Run(ctx context.Context) {
+	if !u.Status().Enabled {
+		// 状态已标记为未启用（版本不可比较，见 New）：不轮询，否则每轮都会白拉一次
+		// Release 接口再因版本比较失败而放弃，与管理端显示的「未启用」也对不上。
+		return
+	}
 	u.runOnce(ctx)
 	ticker := time.NewTicker(u.cfg.Interval)
 	defer ticker.Stop()
@@ -268,7 +277,11 @@ func (u *Updater) Refresh(ctx context.Context) error {
 }
 
 // refresh 执行一次“检查 → 记录状态”，返回仍高于当前版本的候选更新（无可用更新时为空切片）。
+// 未启用时直接返回：此时 LastError 里存的是停用原因，不能被一次空检查覆盖掉。
 func (u *Updater) refresh(ctx context.Context) ([]*Release, error) {
+	if !u.Status().Enabled {
+		return nil, nil
+	}
 	candidates, err := u.Check(ctx)
 	u.markChecked(candidates, err)
 	return candidates, err
