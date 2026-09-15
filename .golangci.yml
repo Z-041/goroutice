@@ -1,0 +1,61 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: standard          # 以官方默认集为基线（errcheck, govet, ineffassign, staticcheck, unused）
+  enable:
+    # --- Bug 与错误处理 ---
+    - bodyclose              # HTTP 响应体必须关闭
+    - contextcheck           # context.Context 用法正确性
+    - errorlint              # 错误比较用 errors.Is / errors.As
+    - nilerr                 # 错误不为 nil 却返回 nil
+    - rowserrcheck           # 检查 sql.Rows.Err() 是否被处理
+    - sqlclosecheck          # 检查 sql 资源是否关闭
+
+    # --- 安全 ---
+    - gosec                  # 安全漏洞模式检测
+
+    # --- 风格与一致性 ---
+    - misspell               # 拼写检查
+    - revive                 # 可配置的代码规范检查
+    - unconvert              # 不必要的类型转换
+    - wastedassign           # 无效赋值
+
+    # --- 复杂度与可维护性 ---
+    - gocyclo                # 圈复杂度
+    - goconst                # 重复字符串提取为常量
+  exclusions:
+    rules:
+      # 测试文件中放宽复杂度限制
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - gosec
+          - errcheck
+          - goconst
+  settings:
+    gocyclo:
+      min-complexity: 15
+    goconst:
+      min-len: 3
+      min-occurrences: 3
+    revive:
+      rules:
+        - name: exported
+          disabled: false
+
+issues:
+  max-issues-per-linter: 0   # 不限制单个 linter 的问题数量
+  max-same-issues: 0         # 不限制同类问题的数量
+  new: false                 # 保持全量检查：CI 也跑全量，避免历史问题被「只报新增」长期掩盖
+
+output:
+  formats:
+    text:
+      path: stdout
+      print-issued-lines: true
+      print-linter-name: true

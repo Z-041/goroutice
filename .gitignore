@@ -1,0 +1,45 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+bin/
+dist/
+
+# Test binaries
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependency directory
+vendor/
+
+# Local module/build cache (workaround for restricted GOMODCACHE)
+.gomod/
+.lintcache
+.gocache/
+.golangci-lint-cache/
+
+# Environment
+.env
+.env.local
+
+# Uploaded files (keep the directory itself)
+/uploads/*
+!/uploads/.gitkeep
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+
+# Logs
+*.log
+logs/
+
+# Config override (local secrets)
+config.local.yaml

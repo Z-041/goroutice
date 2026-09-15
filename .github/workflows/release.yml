@@ -1,0 +1,129 @@
+name: Release
+
+# 推送 v* 标签即触发：先跑测试与静态检查，再构建 Windows 产物并作为 Release 资产上传。
+# 客户端 updater 依赖以下两点，修改本文件时务必保持：
+#   1. 产物文件名以 `-{GOOS}-{GOARCH}.exe` 结尾（按 runtime.GOOS-GOARCH 拼接后缀匹配）；
+#   2. 同一个 Release 下必须存在 checksums.txt，且其中记录的文件名与资产名完全一致。
+on:
+  push:
+    tags:
+      - "v*"
+
+# 默认只给读权限，写权限收紧到真正的发布 job。
+permissions:
+  contents: read
+
+# 同一标签重复触发（重跑、删除后重建）时串行执行：
+# 并发写同一个 Release 会出现资产互相覆盖，中途取消还会留下半成品。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Test and lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 标签一旦发布，运行中的实例会自动下载替换二进制，坏提交的代价是整批实例不可用，
+      # 因此把测试与静态检查放在发布之前作为闸门。
+      - name: Test
+        env:
+          # 测试用的 SQLite 驱动是纯 Go 实现，关闭 CGO 也能跑全部用例。
+          CGO_ENABLED: "0"
+        run: go test -count=1 ./...
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # 与本地开发保持同一版本，避免「本地 0 issues、CI 报错」的偏差。
+          version: v2.13.2
+
+  release:
+    name: Build and publish
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # 创建 Release 并上传资产需要写权限，仅此 job 授予。
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build exe
+        shell: bash
+        env:
+          # 关闭 CGO 产出静态二进制：自更新替换后不依赖额外运行库。
+          CGO_ENABLED: "0"
+          GOOS: windows
+          GOARCH: amd64
+        run: |
+          set -euo pipefail
+
+          # 标签名是版本号唯一源头：既注入二进制 main.version，也用于产物文件名。
+          version="${GITHUB_REF_NAME}"
+          name="goroutice-${version#v}-${GOOS}-${GOARCH}.exe"
+
+          # 资产名即客户端匹配依据，写错（例如换了 GOARCH 却忘了改）会发布出一个
+          # 永远无人匹配的资产，且只在客户端日志里以 warn 呈现，这里直接失败。
+          suffix="-${GOOS}-${GOARCH}.exe"
+          case "$name" in
+            *"${suffix}") ;;
+            *)
+              echo "::error::asset name ${name} does not end with ${suffix}"
+              exit 1
+              ;;
+          esac
+
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w -X main.version=${version}" -o "dist/${name}" ./cmd/server
+          ls -lh "dist/${name}"
+
+      - name: Generate checksums.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd dist
+          # 必须用 `*.exe` 而不是 `./*.exe`：后者会写入 `./` 前缀，
+          # 而 updater 是按资产名精确比对的，前缀会导致校验条目匹配不上。
+          sha256sum *.exe > checksums.txt
+          cat checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 资产名取文件 basename，需与 checksums.txt 中记录的名称保持一致。
+          files: |
+            dist/*.exe
+            dist/checksums.txt
+          # 带连字符的标签视为预发布（如 v1.1.0-rc.1）：客户端拉的是 /releases/latest，
+          # 而该接口不返回预发布版，因此预发布不会被自动分发到运行中的实例。
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          # 本说明会前置在自动生成的变更列表之前：自更新是静默替换二进制并重启，
+          # 升级前要确认的事项必须出现在 Release 页最显眼的位置。
+          body: |
+            > 本产物由 CI 构建，运行中的实例会通过 updater 自动下载并替换二进制后重启。
+            >
+            > 升级前请阅读[升级注意事项](https://github.com/${{ github.repository }}/blob/main/docs/API.md)；
+            > 若该版本要求新增环境变量（如 `BLOG_JWT_SECRET`、`BLOG_DATABASE_PASSWORD`），
+            > 请先在 `.env` 或系统环境变量中配置，否则新进程可能启动失败。
+            >
+            > 资产约定：`*-windows-amd64.exe` 与 `checksums.txt`（二者缺一客户端不会升级）。
+          generate_release_notes: true
