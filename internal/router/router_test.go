@@ -95,7 +95,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	auditService := service.NewAuditService(auditRepo)
 	authService.SetAuditor(auditService)
 
-	articleService := service.NewArticleService(articleRepo, categoryRepo, tagRepo, articleRevisionRepo, 3)
+	articleService := service.NewArticleService(
+		articleRepo, categoryRepo, tagRepo, articleRevisionRepo, 3, service.NewViewTracker(30),
+	)
 	siteConfig := config.SiteConfig{BaseURL: "https://blog.example.com", Title: "Test Blog"}
 
 	handlers := Handlers{
@@ -368,6 +370,7 @@ func TestRouter_SiteFiles(t *testing.T) {
 		repository.NewTagRepository(env.db),
 		repository.NewArticleRevisionRepository(env.db),
 		0,
+		service.NewViewTracker(30),
 	)
 	published, err := articles.Create(env.authorID, dto.ArticleRequest{
 		Title: "Hello World", Slug: "hello-world", Summary: "摘要", Content: "正文", Status: model.ArticlePublished,

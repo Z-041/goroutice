@@ -142,7 +142,7 @@ Authorization: Bearer <access_token>
 | 401 | 未认证 | 缺少/格式错误的 Authorization 头、令牌无效或过期、refresh token 无效或过期（加载账号时数据库故障属服务端故障，返回 500） |
 | 403 | 无权限 | 角色不满足策略、非本人资源、账号被禁用、邮箱未验证 |
 | 404 | 资源不存在 | 目标记录不存在；公开接口访问未发布文章同样返回 404 |
-| 409 | 冲突 | 用户名/邮箱重复、分类名/标签名重复、策略或角色继承已存在、分类被文章引用 |
+| 409 | 冲突 | 用户名/邮箱重复、分类名/标签名重复、策略或角色继承已存在、分类被文章引用、文章内容被他人抢先修改（乐观锁，见 `PUT /api/v1/articles/:id`） |
 | 413 | 请求体过大 | 超过 `server.max_body_size` |
 | 429 | 请求过于频繁 | 触发限流或登录失败锁定 |
 | 500 | 服务内部错误 | 未预期异常、panic 恢复、Casbin 执行异常 |
@@ -697,9 +697,11 @@ Authorization: Bearer <access_token>
 
 公开文章详情，`key` 可为文章 ID（UUID）或 slug。
 
-**响应（200）**：`data` 为文章详情对象（含 `content`，其余字段同上）。
+**响应（200）**：`data` 为文章详情对象（含 `content` 与 `version`，其余字段同上）。
 
-> 每次成功请求都会使 `view_count` +1，返回体中的 `view_count` 已是自增后的值。
+> `view_count` 按**来源去重**后自增：同一来源（IP + `User-Agent`）在该文章的去重窗口内重复打开只计一次，返回体中的 `view_count` 已是本次自增后的值（未计入本次时返回当前值）。
+> 去重窗口由 `article.view_dedup_minutes` 配置（默认 30 分钟），改用另一个浏览器（UA 不同）或换网络（IP 不同）都会计为新的一次。
+> 该机制用于抑制刷新与爬虫造成的失真，**不是安全边界**：刻意伪造 `User-Agent` 仍可绕过。
 
 **常见错误**：`404 article not found`（不存在**或未发布**均返回 404）。
 
@@ -820,12 +822,14 @@ Authorization: Bearer <access_token>
 | `status` | string | 否 | `draft`/`published`/`archived`，缺省为 `draft` |
 | `category_id` | string | 否 | 必须为已存在分类 ID |
 | `tag_ids` | []string | 否 | 必须全部为已存在标签 ID；自动去重、忽略空串 |
+| `version` | int | 否 | 乐观锁版本号（≥0）；创建时忽略 |
 
 **行为说明**
 
 - `slug` 为空时由 `title` 自动生成（中文等非 ASCII 标题会退化为 8 位随机串）。
 - slug 冲突不报错，自动追加 `-2`、`-3` 等后缀。
 - `status=published` 时首次写入 `published_at`。
+- 新建文章的 `version` 恒为 `1`（随详情返回）。
 
 **响应（201）**：`data` 为文章详情对象。
 
@@ -842,6 +846,18 @@ Authorization: Bearer <access_token>
 
 > 除 `slug`（为空或与原值相同则不改动）与 `status`（为空则保持原状态）外，其余字段均为覆盖写；`tag_ids` 为空数组时会清空标签关联。
 
+**乐观锁（`version`）**
+
+请求体里的 `version` 是**编辑前从详情接口读到的版本号**，用于避免覆盖他人已提交的修改：
+
+- 传 `0` 或不传：不做并发检查（兼容尚未接入该字段的客户端）。
+- 传非 0 且与库中版本不一致：**拒绝写入并返回 `409`**，返回体不含 `data`，调用方应重新拉取详情、合并改动后再提交。
+- 写入成功后 `version` 自增 1，响应体里是最新值。
+
+> 版本号在**文章内容被改动时**推进，包括 `PUT /api/v1/articles/:id`（含回滚）与 `PUT /api/v1/admin/articles/:id/status`。
+> 因此管理员改了状态后，作者用打开编辑页时的旧 `version` 提交同样会得到 `409`——这正是要拦住的情况。
+> `PUT /api/v1/admin/articles/:id/feature`（置顶/推荐）**不**推进版本：这两个字段不属于 `ArticleRequest`，`PUT` 覆盖不到它们，推进只会带来无从处理的 `409`。
+
 **响应（200）**：`data` 为更新后的文章详情。
 
 **常见错误**
@@ -849,6 +865,7 @@ Authorization: Bearer <access_token>
 - `404 article not found`。
 - `403 you can only modify your own articles`。
 - `400 invalid slug` / `400 category not found` / `400 one or more tags not found`。
+- `409 article was modified by someone else, reload and retry`。
 
 ### DELETE `/api/v1/articles/:id`
 
@@ -915,12 +932,13 @@ Authorization: Bearer <access_token>
 
 > 回滚本身也会写入一条修订（记录回滚前的内容），因此**回滚可以被再次回滚**。
 > 回滚会连同 `title`、`slug`、`summary`、`content`、`cover_image`、`status`、`category_id`、`tag_ids` 一起恢复为快照内容。
+> 该接口没有请求体，乐观锁由服务端用刚读到的版本号施加：能拦住「读取之后、写入之前被他人改动」的情况，冲突时返回 `409`；重新调用即可（回滚是幂等的）。
 
 **响应（200）**：`data` 为回滚后的文章详情对象。
 
 **副作用**：写入审计日志 `article_restore`（`article=<slug> revision=<revisionId>`）。
 
-**常见错误**：`404 article not found`、`404 revision not found`、`403 you can only modify your own articles`。
+**常见错误**：`404 article not found`、`404 revision not found`、`403 you can only modify your own articles`、`409 article was modified by someone else, reload and retry`。
 
 ---
 
@@ -1077,6 +1095,8 @@ Authorization: Bearer <access_token>
 
 更新文章状态。
 
+> 该接口会推进文章的 `version`：状态属于 `ArticleRequest` 可覆盖的字段，推进版本才能拦住「作者用旧版本提交、把管理员刚归档的状态改回已发布」。
+
 **请求体**
 
 ```json
@@ -1105,6 +1125,7 @@ Authorization: Bearer <access_token>
 ```
 
 > 两个字段均为指针，未传入时保持原值；两者都未传返回 `400 nothing to update`。
+> 该接口**不**推进 `version`：`is_pinned` / `is_featured` 不在 `ArticleRequest` 里，`PUT /articles/:id` 覆盖不到它们。
 
 **响应（200）**
 
@@ -1422,7 +1443,8 @@ Authorization: Bearer <access_token>
 | `content` | string | 正文（仅详情返回） |
 | `cover_image` | string | 封面 URL |
 | `status` | string | 状态 |
-| `view_count` | int64 | 浏览量 |
+| `view_count` | int64 | 浏览量（按来源去重后累计） |
+| `version` | int | 内容版本号（从 1 起）；**仅详情返回**，列表无此字段。编辑时原样回传以启用乐观锁 |
 | `is_pinned` | bool | 是否置顶 |
 | `is_featured` | bool | 是否推荐 |
 | `category_id` | string | 分类 ID |
@@ -1522,6 +1544,8 @@ Authorization: Bearer <access_token>
 6. **限流与锁定**：登录失败 5 次将锁定 15 分钟，`429` 时不要高频重试。
 7. **`400 invalid request body`** 不区分具体字段，前端需自行做前置校验并给出字段级提示。
 8. **请求追踪**：可自行传入 `X-Request-Id`（非必填），服务端回显同一值；不传则生成 UUID。该头已加入 CORS 白名单与暴露头，浏览器端可自由设置并读取，报错时可一并反馈给后端定位。
+9. **文章编辑需回传 `version`**：`GET /articles/:key`（公开详情）或 `GET /me/articles/:id`（作者详情）返回的 `version` 要随表单一起保存，`PUT /articles/:id` 时原样放进请求体。收到 `409` 表示文章已被他人（如管理员改状态）改动，此时应重新拉取详情、让用户决定保留哪一份，再重新提交——不要自动重试，否则等于把乐观锁关掉。
+   > `version` 只在**详情**响应里，列表（`ArticleSummary`）没有；不传或传 `0` 时服务端不做并发检查。
 
 ---
 
@@ -1546,3 +1570,9 @@ Authorization: Bearer <access_token>
     > 此前 `keyword=%` 会命中全部文章、`a-b` 会变成「含 a 且不含 b」。现在：有全文索引时前者返回空列表、后者按两个词的 AND 处理；无全文索引（`LIKE` 回退）时前者按字面 `%` 做子串匹配。前端若依赖旧行为需调整。
 11. **新增 `article_revisions` 表与 `ft_article` 全文索引**：迁移随启动自动完成，无需手工建表；MySQL 需 8.0+，`ft_article` 创建失败（如账号无 `ALTER` 权限）只记录警告并降级为 `LIKE` 检索。
 12. **新增根路径 `/feed.xml`、`/sitemap.xml`、`/robots.txt`**：无需鉴权，内容取自已发布文章。升级后请把 `site.base_url` 改为真实对外域名，否则订阅源与站点地图里的链接会指向 `http://localhost:8080`。
+13. **文章新增乐观锁字段 `version`**：`articles` 表新增 `version` 列（迁移随启动自动完成，老数据被补为 `1`）。详情响应新增 `version`，`PUT /api/v1/articles/:id` 请求体新增可选 `version`。
+    > **向后兼容**：不传或传 `0` 时不做并发检查，旧前端无需改动即可继续工作。要真正启用保护，前端需在编辑时回传该值（见[前端对接注意事项](#前端对接注意事项)第 9 条）。
+    > 两个管理员/作者同时编辑同一篇文章时，后提交者现在会收到 `409` 而不是静默覆盖前者的改动。
+14. **浏览量改为按来源去重**：`view_count` 不再每次请求都 +1，同一来源（IP + `User-Agent`）在窗口内重复打开同一篇文章只计一次，窗口由新增配置 `article.view_dedup_minutes` 控制（默认 30 分钟）。
+    > 升级后 `view_count` 的增速会明显下降，这是**预期行为**（此前刷新页面、爬虫抓取都会累加），并非统计丢失。
+    > 该去重状态保存在**进程内存**中：多实例部署时各实例各自计数（同一访客可能被多个实例各计一次），重启后窗口重置。若需要严格去重需引入外部存储，当前刻意不做以保持零外部依赖。

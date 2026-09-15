@@ -23,15 +23,18 @@ type ArticleService struct {
 	revisionRepo *repository.ArticleRevisionRepository
 	// revisionKeep 是每篇文章保留的历史修订条数，<= 0 表示不记录修订。
 	revisionKeep int
+	// views 负责浏览量的来源去重：没有它，刷新页面和爬虫都会把 view_count 灌成无意义的数字。
+	views *ViewTracker
 }
 
-// NewArticleService 构造 ArticleService，revisionKeep 为每篇文章保留的修订条数。
+// NewArticleService 构造 ArticleService，revisionKeep 为每篇文章保留的修订条数，views 为浏览量去重器。
 func NewArticleService(
 	articleRepo *repository.ArticleRepository,
 	categoryRepo *repository.CategoryRepository,
 	tagRepo *repository.TagRepository,
 	revisionRepo *repository.ArticleRevisionRepository,
 	revisionKeep int,
+	views *ViewTracker,
 ) *ArticleService {
 	return &ArticleService{
 		articleRepo:  articleRepo,
@@ -39,6 +42,7 @@ func NewArticleService(
 		tagRepo:      tagRepo,
 		revisionRepo: revisionRepo,
 		revisionKeep: revisionKeep,
+		views:        views,
 	}
 }
 
@@ -109,16 +113,20 @@ func (s *ArticleService) Create(authorID string, req dto.ArticleRequest) (*dto.A
 }
 
 // Update 更新文章，仅作者本人或管理员可操作。
+// req.Version 非 0 时启用乐观锁：与库中版本不符说明文章已被他人改过，返回 409 而不是覆盖。
 func (s *ArticleService) Update(userID string, roles []string, id string, req dto.ArticleRequest) (*dto.ArticleInfo, error) {
 	a, err := s.loadForWrite(userID, roles, id)
 	if err != nil {
 		return nil, err
 	}
-	return s.applyUpdate(a, userID, req)
+	return s.applyUpdate(a, userID, req, req.Version)
 }
 
 // RestoreRevision 把文章回滚到指定修订，仅作者本人或管理员可操作。
 // 回滚前会先按当前内容写一条修订，因此回滚本身同样可以被再回滚。
+//
+// 请求没有请求体，乐观锁用服务端刚读到的版本号：能拦住「读取之后、写入之前」被他人改动的情况，
+// 调用方收到 409 后重新读取再回滚即可（回滚本身是幂等的）。
 func (s *ArticleService) RestoreRevision(userID string, roles []string, articleID, revisionID string) (*dto.ArticleInfo, error) {
 	a, err := s.loadForWrite(userID, roles, articleID)
 	if err != nil {
@@ -139,7 +147,7 @@ func (s *ArticleService) RestoreRevision(userID string, roles []string, articleI
 		Status:     rev.Status,
 		CategoryID: rev.CategoryID,
 		TagIDs:     rev.TagIDList(),
-	})
+	}, a.Version)
 }
 
 // ListRevisions 分页查询某篇文章的修订历史，仅作者本人或管理员可操作。
@@ -203,7 +211,8 @@ func (s *ArticleService) loadOwnedRevision(articleID, revisionID string) (*model
 }
 
 // applyUpdate 校验并施加变更，把「更新前」的状态存为一条修订后落库。
-func (s *ArticleService) applyUpdate(a *model.Article, editorID string, req dto.ArticleRequest) (*dto.ArticleInfo, error) {
+// expectedVersion > 0 时启用乐观锁，冲突由仓储层返回 ErrVersionConflict，这里翻译成 409。
+func (s *ArticleService) applyUpdate(a *model.Article, editorID string, req dto.ArticleRequest, expectedVersion int) (*dto.ArticleInfo, error) {
 	// 快照必须在下面就地改写 a 之前抓取，否则记下来的就是更新后的内容，
 	// 修订历史会退化成「保存即等于当前版本」，失去回溯意义。
 	rev := s.newRevision(a, editorID)
@@ -228,7 +237,18 @@ func (s *ArticleService) applyUpdate(a *model.Article, editorID string, req dto.
 		return nil, err
 	}
 
-	if err := s.articleRepo.Update(a, tagIDs, rev, s.revisionKeep); err != nil {
+	// 修订与正文必须同一个事务：任一失败都要整体回滚，否则会留下「改了正文却没记快照」的静默丢档。
+	err = s.articleRepo.Update(repository.ArticleUpdate{
+		Article:         a,
+		TagIDs:          tagIDs,
+		Revision:        rev,
+		KeepRevisions:   s.revisionKeep,
+		ExpectedVersion: expectedVersion,
+	})
+	if errors.Is(err, repository.ErrVersionConflict) {
+		return nil, apperror.Conflict("article was modified by someone else, reload and retry")
+	}
+	if err != nil {
 		return nil, err
 	}
 	return s.getByID(a.ID)
@@ -312,8 +332,11 @@ func (s *ArticleService) Delete(userID string, roles []string, id string) error 
 	return s.articleRepo.Delete(id)
 }
 
-// GetPublished 获取已发布文章详情（按 ID 或 slug），并累加浏览数。
-func (s *ArticleService) GetPublished(key string) (*dto.ArticleInfo, error) {
+// GetPublished 获取已发布文章详情（按 ID 或 slug），并按来源去重后累加浏览数。
+//
+// viewer 是访问者标识（由 handler 用 IP + User-Agent 拼成）：同一来源在窗口内重复打开
+// 同一篇文章只计一次。不做去重的话，刷新一次算一次、爬虫抓一次算一次，view_count 会彻底失真。
+func (s *ArticleService) GetPublished(key, viewer string) (*dto.ArticleInfo, error) {
 	var (
 		a   *model.Article
 		err error
@@ -333,8 +356,10 @@ func (s *ArticleService) GetPublished(key string) (*dto.ArticleInfo, error) {
 		return nil, apperror.NotFound("article not found")
 	}
 
-	_ = s.articleRepo.IncrementView(a.ID)
-	a.ViewCount++
+	if s.views.Fresh(a.ID, viewer) {
+		_ = s.articleRepo.IncrementView(a.ID)
+		a.ViewCount++
+	}
 
 	return dto.ToArticleInfo(a), nil
 }

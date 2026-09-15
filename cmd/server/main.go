@@ -61,6 +61,7 @@ type app struct {
 	handlers              router.Handlers
 	limiter               *middleware.RateLimiter
 	loginLimiter          *service.LoginLimiter
+	viewTracker           *service.ViewTracker
 }
 
 // tokenCleanupInterval 是过期令牌的清理周期。
@@ -155,10 +156,17 @@ func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *
 		RequireSpecial:   cfg.Security.PasswordRequireSpecial,
 	})
 	authService.SetAuditor(auditService)
+
 	userService := service.NewUserService(userRepo, roleRepo)
 	categoryService := service.NewCategoryService(categoryRepo)
 	tagService := service.NewTagService(tagRepo)
-	articleService := service.NewArticleService(articleRepo, categoryRepo, tagRepo, articleRevisionRepo, cfg.Article.RevisionKeep)
+	// 浏览量去重器：按 来源 + 文章 在窗口内只计一次浏览。
+	viewTracker := service.NewViewTracker(cfg.Article.ViewDedupMinutes)
+	articleService := service.NewArticleService(
+		articleRepo, categoryRepo, tagRepo, articleRevisionRepo,
+		cfg.Article.RevisionKeep,
+		viewTracker,
+	)
 	fileService := service.NewFileService(fileRepo, &cfg.Upload)
 	policyService := service.NewPolicyService(enforcer, userRepo, roleRepo, auditService)
 
@@ -185,6 +193,7 @@ func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *
 		},
 		limiter:      limiter,
 		loginLimiter: loginLimiter,
+		viewTracker:  viewTracker,
 	}
 }
 
@@ -192,6 +201,7 @@ func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *
 func (a *app) startBackground(ctx context.Context) {
 	go a.limiter.Cleanup(ctx, time.Minute)
 	go a.loginLimiter.Cleanup(ctx, time.Minute)
+	go a.viewTracker.Cleanup(ctx, time.Minute)
 	go a.cleanupExpiredTokens(ctx)
 }
 

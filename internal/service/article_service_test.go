@@ -1,11 +1,14 @@
 package service
 
 import (
+	"errors"
+	"net/http"
 	"strconv"
 	"testing"
 
 	"goroutice/internal/dto"
 	"goroutice/internal/model"
+	"goroutice/internal/pkg/apperror"
 	"goroutice/internal/repository"
 
 	"gorm.io/gorm"
@@ -13,6 +16,10 @@ import (
 
 // testRevisionKeep 是测试中每篇文章保留的修订条数。取小值以便直接验证裁剪边界。
 const testRevisionKeep = 3
+
+// testViewDedupMinutes 是测试中浏览量去重的窗口（分钟）。
+// 用默认窗口即可：需要验证窗口过期时由 view_tracker_test.go 直接控制时钟。
+const testViewDedupMinutes = 30
 
 func newArticleService(t *testing.T) (*ArticleService, *gorm.DB) {
 	t.Helper()
@@ -24,6 +31,7 @@ func newArticleService(t *testing.T) (*ArticleService, *gorm.DB) {
 		repository.NewTagRepository(db),
 		repository.NewArticleRevisionRepository(db),
 		testRevisionKeep,
+		NewViewTracker(testViewDedupMinutes),
 	)
 	return svc, db
 }
@@ -66,7 +74,7 @@ func TestArticleService_GetPublished(t *testing.T) {
 
 	a, _ := svc.Create(author.ID, dto.ArticleRequest{Title: "Hello", Content: "body", Status: model.ArticlePublished})
 
-	got, err := svc.GetPublished(a.Slug)
+	got, err := svc.GetPublished(a.Slug, "10.0.0.1|test-agent")
 	if err != nil {
 		t.Fatalf("get published: %v", err)
 	}
@@ -76,8 +84,35 @@ func TestArticleService_GetPublished(t *testing.T) {
 
 	// 草稿不可公开访问
 	draft, _ := svc.Create(author.ID, dto.ArticleRequest{Title: "Draft", Content: "body", Status: model.ArticleDraft})
-	if _, err := svc.GetPublished(draft.Slug); err == nil {
+	if _, err := svc.GetPublished(draft.Slug, "10.0.0.1|test-agent"); err == nil {
 		t.Fatal("expected draft not publicly accessible")
+	}
+}
+
+// TestArticleService_ViewDedup 覆盖浏览量去重：同一来源窗口内重复打开只计一次，
+// 换来源（另一个 IP 或另一个浏览器）才计新的一次。
+func TestArticleService_ViewDedup(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+	a, _ := svc.Create(author.ID, dto.ArticleRequest{Title: "Hello", Content: "body", Status: model.ArticlePublished})
+
+	for i := 0; i < 3; i++ {
+		got, err := svc.GetPublished(a.Slug, "10.0.0.1|agent-a")
+		if err != nil {
+			t.Fatalf("get published #%d: %v", i+1, err)
+		}
+		if got.ViewCount != 1 {
+			t.Fatalf("第 %d 次访问后 view_count = %d，期望仍为 1（同一来源应被去重）", i+1, got.ViewCount)
+		}
+	}
+
+	// 同一 IP 换浏览器：UA 不同即视为另一个访客。
+	if got, _ := svc.GetPublished(a.Slug, "10.0.0.1|agent-b"); got.ViewCount != 2 {
+		t.Fatalf("view_count = %d，期望 2（UA 不同应计新的一次）", got.ViewCount)
+	}
+	// 不同 IP 的同款浏览器。
+	if got, _ := svc.GetPublished(a.Slug, "10.0.0.2|agent-a"); got.ViewCount != 3 {
+		t.Fatalf("view_count = %d，期望 3（IP 不同应计新的一次）", got.ViewCount)
 	}
 }
 
@@ -212,7 +247,7 @@ func TestArticleService_SetFeature(t *testing.T) {
 		t.Fatalf("set feature: %v", err)
 	}
 
-	got, err := svc.GetPublished(a.ID)
+	got, err := svc.GetPublished(a.ID, "10.0.0.1|test-agent")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -422,6 +457,103 @@ func TestArticleService_RevisionAccessControl(t *testing.T) {
 	other, _ := svc.Create(authorB.ID, dto.ArticleRequest{Title: "B's Post", Content: "b1"})
 	if _, err := svc.RestoreRevision(authorB.ID, []string{model.RoleAuthor}, other.ID, revisions[0].ID); err == nil {
 		t.Fatal("expected not found for revision of another article")
+	}
+}
+
+// assertConflict 断言错误是 409 版本冲突。
+func assertConflict(t *testing.T, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("期望 409 版本冲突，实际写入成功了")
+	}
+	var appErr *apperror.AppError
+	if !errors.As(err, &appErr) || appErr.Status != http.StatusConflict {
+		t.Fatalf("期望 409 版本冲突，实际为 %v", err)
+	}
+}
+
+// TestArticleService_VersionConflict 覆盖乐观锁：带着过期 version 的提交必须被拒绝，
+// 而不是把别人刚写入的内容静默覆盖掉。
+func TestArticleService_VersionConflict(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+	roles := []string{model.RoleAuthor}
+
+	a, err := svc.Create(author.ID, dto.ArticleRequest{Title: "Post", Content: "v1"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if a.Version != 1 {
+		t.Fatalf("新建文章 version = %d，期望 1", a.Version)
+	}
+
+	// 带正确版本提交：写入成功且版本自增。
+	updated, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{
+		Title: "Post", Content: "v2", Version: a.Version,
+	})
+	if err != nil {
+		t.Fatalf("带最新 version 的更新失败: %v", err)
+	}
+	if updated.Version != a.Version+1 {
+		t.Fatalf("更新后 version = %d，期望 %d", updated.Version, a.Version+1)
+	}
+
+	// 复用已被推进过的旧版本号：必须 409，且正文保持他人写入的结果。
+	if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{
+		Title: "Post", Content: "stale overwrite", Version: a.Version,
+	}); err != nil {
+		assertConflict(t, err)
+	} else {
+		t.Fatal("旧 version 的提交被接受了，内容会被静默覆盖")
+	}
+
+	got, err := svc.GetMine(author.ID, roles, a.ID)
+	if err != nil {
+		t.Fatalf("get mine: %v", err)
+	}
+	if got.Content != "v2" {
+		t.Fatalf("冲突提交不应落库，正文 = %q，期望仍是 v2", got.Content)
+	}
+
+	// version 传 0（省略）表示不做并发检查：尚未接入该字段的客户端仍能正常保存。
+	if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{Title: "Post", Content: "v3"}); err != nil {
+		t.Fatalf("不带 version 的更新应保持向后兼容: %v", err)
+	}
+}
+
+// TestArticleService_VersionConflict_StatusBump 覆盖「状态变更也推进版本」：
+// 管理员归档后，作者拿编辑页里的旧版本提交，不应把状态悄悄改回已发布。
+func TestArticleService_VersionConflict_StatusBump(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+	roles := []string{model.RoleAuthor}
+
+	a, err := svc.Create(author.ID, dto.ArticleRequest{
+		Title: "Post", Content: "v1", Status: model.ArticlePublished,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	stale := a.Version
+
+	if err := svc.UpdateStatus(a.ID, model.ArticleArchived); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+
+	if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{
+		Title: "Post", Content: "v2", Status: model.ArticlePublished, Version: stale,
+	}); err != nil {
+		assertConflict(t, err)
+	} else {
+		t.Fatal("归档后旧 version 的提交被接受了，状态会被改回已发布")
+	}
+
+	got, err := svc.GetMine(author.ID, roles, a.ID)
+	if err != nil {
+		t.Fatalf("get mine: %v", err)
+	}
+	if got.Status != model.ArticleArchived {
+		t.Fatalf("状态 = %q，期望仍为 %q", got.Status, model.ArticleArchived)
 	}
 }
 

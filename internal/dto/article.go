@@ -16,6 +16,9 @@ type ArticleRequest struct {
 	Status     string   `json:"status" binding:"omitempty,oneof=draft published archived"`
 	CategoryID string   `json:"category_id"`
 	TagIDs     []string `json:"tag_ids"`
+	// Version 是乐观锁：把读取详情时拿到的 version 回传，服务端据此拒绝覆盖他人已提交的修改。
+	// 传 0 或省略表示不做并发检查（兼容尚未接该字段的客户端）。
+	Version int `json:"version" binding:"min=0"`
 }
 
 // ArticleStatusRequest 更新文章状态请求。
@@ -31,14 +34,16 @@ type ArticleFeatureRequest struct {
 
 // ArticleInfo 文章详情响应（含正文）。
 type ArticleInfo struct {
-	ID          string        `json:"id"`
-	Title       string        `json:"title"`
-	Slug        string        `json:"slug"`
-	Summary     string        `json:"summary"`
-	Content     string        `json:"content"`
-	CoverImage  string        `json:"cover_image"`
-	Status      string        `json:"status"`
-	ViewCount   int64         `json:"view_count"`
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	Slug       string `json:"slug"`
+	Summary    string `json:"summary"`
+	Content    string `json:"content"`
+	CoverImage string `json:"cover_image"`
+	Status     string `json:"status"`
+	ViewCount  int64  `json:"view_count"`
+	// Version 用于乐观锁：编辑前先取此值，提交时原样回传（见 ArticleRequest.Version）。
+	Version     int           `json:"version"`
 	IsPinned    bool          `json:"is_pinned"`
 	IsFeatured  bool          `json:"is_featured"`
 	CategoryID  string        `json:"category_id"`
@@ -86,6 +91,7 @@ func ToArticleInfo(a *model.Article) *ArticleInfo {
 		CoverImage:  a.CoverImage,
 		Status:      a.Status,
 		ViewCount:   a.ViewCount,
+		Version:     a.Version,
 		IsPinned:    a.IsPinned,
 		IsFeatured:  a.IsFeatured,
 		CategoryID:  a.CategoryID,

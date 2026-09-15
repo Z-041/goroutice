@@ -51,12 +51,27 @@ func (h *ArticleHandler) PublicList(c *gin.Context) {
 
 // PublicDetail 公开文章详情（按 ID 或 slug）。
 func (h *ArticleHandler) PublicDetail(c *gin.Context) {
-	item, err := h.articleService.GetPublished(c.Param("key"))
+	item, err := h.articleService.GetPublished(c.Param("key"), viewerKey(c))
 	if err != nil {
 		handleError(c, err)
 		return
 	}
 	response.Success(c, item)
+}
+
+// maxUserAgentLen 限制参与浏览量去重的 User-Agent 长度。
+// 该头由客户端任意填充（服务器允许的上限是 MB 级），原样当 map 键会让少量请求就撑起大量内存。
+const maxUserAgentLen = 128
+
+// viewerKey 构造浏览量去重键：IP + User-Agent。
+// 带上 User-Agent 是为了区分同一出口 IP 下的不同读者（公司内网、运营商 NAT），
+// 否则一篇热门文章在同网段里被几十个人读过也只会计一次。
+func viewerKey(c *gin.Context) string {
+	ua := c.GetHeader("User-Agent")
+	if len(ua) > maxUserAgentLen {
+		ua = ua[:maxUserAgentLen]
+	}
+	return c.ClientIP() + "|" + ua
 }
 
 // Create 创建文章。

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"time"
 
 	"goroutice/internal/model"
@@ -47,13 +48,32 @@ func (r *ArticleRepository) Create(a *model.Article, tagIDs []string) error {
 	})
 }
 
+// ArticleUpdate 是一次文章内容更新要落库的全部内容。
+type ArticleUpdate struct {
+	Article *model.Article
+	TagIDs  []string
+	// Revision 非空时在同一事务内追加一条修订快照。
+	Revision *model.ArticleRevision
+	// KeepRevisions 是保留的修订条数，<= 0 表示不裁剪。
+	KeepRevisions int
+	// ExpectedVersion > 0 时启用乐观锁：仅当库中 version 与它相等才写入，
+	// 否则返回 ErrVersionConflict。传 0 表示不做并发检查。
+	ExpectedVersion int
+}
+
+// ErrVersionConflict 表示文章在客户端读取之后已被他人修改，本次写入被拒绝。
+// 由服务层翻译为 409，而不是 500：这不是服务端故障，是调用方该重新读取后再提交。
+var ErrVersionConflict = errors.New("article version conflict")
+
 // Update 在事务中更新文章可变字段并重建标签关联。
 // 只写入白名单列，避免全字段回写覆盖并发自增的 view_count 与不可变的 created_at。
 //
-// rev 非空时在同一事务内追加一条修订快照，并裁剪该文章的历史到 keepRevisions 条以内。
+// u.Revision 非空时在同一事务内追加一条修订快照，并把该文章的历史裁剪到 u.KeepRevisions 条以内。
 // 快照与正文更新必须同事务：分两次写会出现「正文已改但历史没记」的静默丢档，
 // 而丢档恰恰是修订功能唯一要避免的事。
-func (r *ArticleRepository) Update(a *model.Article, tagIDs []string, rev *model.ArticleRevision, keepRevisions int) error {
+func (r *ArticleRepository) Update(u ArticleUpdate) error {
+	a := u.Article
+
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		updates := map[string]any{
 			"title":        a.Title,
@@ -65,20 +85,31 @@ func (r *ArticleRepository) Update(a *model.Article, tagIDs []string, rev *model
 			"category_id":  a.CategoryID,
 			"published_at": a.PublishedAt,
 			"updated_at":   time.Now(),
+			// 版本号在 SQL 里自增，不能读出来 +1 再写回：并发下的写回会丢掉其中一次自增。
+			"version": gorm.Expr("version + 1"),
 		}
-		if err := tx.Model(&model.Article{}).Where("id = ?", a.ID).Updates(updates).Error; err != nil {
+
+		q := tx.Model(&model.Article{}).Where("id = ?", a.ID)
+		if u.ExpectedVersion > 0 {
+			q = q.Where("version = ?", u.ExpectedVersion)
+		}
+		res := q.Updates(updates)
+		if res.Error != nil {
+			return res.Error
+		}
+		// 匹配不到行说明版本已被他人推进。这里不会把「字段值没变化」误判成冲突：
+		// MySQL 默认返回的是「实际变更行数」，而 version 每次都会变，命中即必然计数。
+		if u.ExpectedVersion > 0 && res.RowsAffected == 0 {
+			return ErrVersionConflict
+		}
+
+		if err := replaceTags(tx, a, u.TagIDs); err != nil {
 			return err
 		}
-		if err := replaceTags(tx, a, tagIDs); err != nil {
-			return err
-		}
-		if rev == nil {
+		if u.Revision == nil {
 			return nil
 		}
-		if err := appendRevision(tx, rev, keepRevisions); err != nil {
-			return err
-		}
-		return nil
+		return appendRevision(tx, u.Revision, u.KeepRevisions)
 	})
 }
 
@@ -201,8 +232,14 @@ func (r *ArticleRepository) IncrementView(id string) error {
 }
 
 // UpdateStatus 更新文章状态；发布时间只在首次发布时写入，重复发布不覆盖原值。
+//
+// status 是 ArticleRequest 能覆盖的字段，因此这里也要推进 version：
+// 否则管理员归档文章后，作者用旧 version 提交的 PUT 会毫无察觉地把状态改回去。
 func (r *ArticleRepository) UpdateStatus(id string, status string) error {
-	updates := map[string]interface{}{"status": status}
+	updates := map[string]interface{}{
+		"status":  status,
+		"version": gorm.Expr("version + 1"),
+	}
 	if status == model.ArticlePublished {
 		updates["published_at"] = gorm.Expr("COALESCE(published_at, ?)", time.Now())
 	}
@@ -210,6 +247,9 @@ func (r *ArticleRepository) UpdateStatus(id string, status string) error {
 }
 
 // UpdateFeature 按需更新文章置顶/推荐标记，nil 表示保持原值，避免读-改-写丢失并发更新。
+//
+// 与 UpdateStatus 不同，这里不推进 version：is_pinned / is_featured 不在 ArticleRequest 里，
+// PUT 覆盖不到它们，推进版本只会让正在编辑的作者收到一次无从处理的 409。
 func (r *ArticleRepository) UpdateFeature(id string, isPinned, isFeatured *bool) error {
 	updates := map[string]interface{}{}
 	if isPinned != nil {

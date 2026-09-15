@@ -138,6 +138,9 @@ type ArticleConfig struct {
 	// RevisionKeep 是每篇文章保留的历史修订条数，超出后从最旧的开始删除。
 	// 设为 0 表示不记录修订历史。
 	RevisionKeep int `mapstructure:"revision_keep"`
+	// ViewDedupMinutes 是浏览量去重窗口（分钟）：同一来源在窗口内重复访问同一篇文章只计一次。
+	// 设为 0 使用内置默认值（30 分钟）。
+	ViewDedupMinutes int `mapstructure:"view_dedup_minutes"`
 }
 
 // Load 从指定配置文件加载配置。
@@ -264,4 +267,5 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("site.language", "zh-CN")
 
 	v.SetDefault("article.revision_keep", 20)
+	v.SetDefault("article.view_dedup_minutes", 30)
 }
