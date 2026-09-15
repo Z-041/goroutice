@@ -48,7 +48,7 @@ func TestRateLimiter_WriteHandlerSkipsReads(t *testing.T) {
 	})
 
 	// GET 请求不受写接口限流影响。
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		w := httptest.NewRecorder()
 		r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/get", nil))
 		if w.Code != http.StatusOK {

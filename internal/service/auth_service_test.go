@@ -167,7 +167,7 @@ func TestAuthService_LoginLockedUnknownAccount(t *testing.T) {
 	svc, _ := newAuthService(t)
 	svc.SetLoginLimiter(NewLoginLimiter(3, 15))
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := svc.Login(dto.LoginRequest{Account: "nobody", Password: "x"}); err == nil {
 			t.Fatal("expected error for unknown account")
 		}

@@ -42,7 +42,7 @@ func Validate(s string) bool {
 	if s[0] == '-' || s[len(s)-1] == '-' {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		isLower := c >= 'a' && c <= 'z'
 		isDigit := c >= '0' && c <= '9'

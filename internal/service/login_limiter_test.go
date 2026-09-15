@@ -6,7 +6,7 @@ func TestLoginLimiter_LockAfterMaxAttempts(t *testing.T) {
 	l := NewLoginLimiter(3, 15)
 	key := "alice"
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if l.Locked(key) {
 			t.Fatalf("not expected locked at attempt %d", i+1)
 		}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"fmt"
 	"html"
@@ -107,13 +108,23 @@ func (m *SmtpMailer) send(to, subject, body string) error {
 	return smtp.SendMail(addr, auth, m.from, []string{to}, msg)
 }
 
+// smtpDialTimeout 是建立 SMTP 连接的超时上限。
+// 不设超时的话，SMTP 服务器无响应时连接会一直挂着，直到操作系统的 TCP 超时（可能长达数分钟）；
+// 注册与重置密码接口会连带卡住，用户只能看到请求一直不返回。
+const smtpDialTimeout = 10 * time.Second
+
 // sendOverTLS 通过隐式 TLS（SMTPS，通常 465 端口）发送。
 func (m *SmtpMailer) sendOverTLS(addr, to string, msg []byte) error {
 	tlsConfig := &tls.Config{
 		ServerName:         m.host,
 		InsecureSkipVerify: m.insecureSkipVerify, //nolint:gosec // 由配置控制，默认关闭，仅用于自建/测试 SMTP
 	}
-	conn, err := tls.Dial("tcp", addr, tlsConfig)
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: smtpDialTimeout},
+		Config:    tlsConfig,
+	}
+	// 这里没有可用的 ctx（Mailer 接口不带 ctx），超时靠上面的 NetDialer 施加。
+	conn, err := dialer.DialContext(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}

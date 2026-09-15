@@ -96,7 +96,7 @@ func TestArticleService_ViewDedup(t *testing.T) {
 	author := createTestUser(t, db, "author", model.RoleAuthor)
 	a, _ := svc.Create(author.ID, dto.ArticleRequest{Title: "Hello", Content: "body", Status: model.ArticlePublished})
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		got, err := svc.GetPublished(a.Slug, "10.0.0.1|agent-a")
 		if err != nil {
 			t.Fatalf("get published #%d: %v", i+1, err)
@@ -407,7 +407,7 @@ func TestArticleService_RevisionPrunedToKeep(t *testing.T) {
 	}
 
 	// 更新次数超过保留上限，历史应被裁剪到 keep 条而不是无限增长。
-	for i := 0; i < testRevisionKeep+2; i++ {
+	for i := range testRevisionKeep + 2 {
 		if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{
 			Title: "Post", Content: "v" + strconv.Itoa(i),
 		}); err != nil {

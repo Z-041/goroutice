@@ -22,7 +22,7 @@ func (u *Updater) prepare(ctx context.Context, rel *Release) (exePath, tmpPath s
 		exePath = resolved
 	}
 
-	//nolint:gosec // 临时文件必须与目标同目录才能原子替换
+	// 临时文件必须与目标同目录，保证下面的 os.Rename 不跨文件系统。
 	tmpFile, err := os.CreateTemp(filepath.Dir(exePath), filepath.Base(exePath)+".new-*")
 	if err != nil {
 		return "", "", fmt.Errorf("create temp file next to executable: %w", err)
@@ -74,7 +74,9 @@ func rollbackExecutable(exePath, backupPath string) error {
 // restart 以分离（detached）方式启动新二进制并透传原启动参数与环境变量，
 // 启动成功后旧进程即可安全退出。
 func (u *Updater) restart(exePath string) error {
-	//nolint:gosec // 必须执行替换后的自身二进制，路径来自 os.Executable
+	// 必须用 exec.Command 而非 exec.CommandContext：新进程要在旧进程退出后继续运行，
+	// 绑定到会随优雅关闭一起取消的 ctx 会把它一起杀掉。
+	//nolint:gosec,noctx // 执行的是替换后的自身二进制，路径来自 os.Executable
 	cmd := exec.Command(exePath, u.cfg.RestartArgs...)
 	// 不设置 cmd.Dir：新进程沿用当前工作目录，与本次启动时解析 config.yaml、
 	// uploads 等相对路径的基准保持一致；改成二进制所在目录会让新进程找不到配置而启动失败。
