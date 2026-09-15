@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -173,5 +174,40 @@ func TestResolvePathMissingReturnsAbsoluteCandidate(t *testing.T) {
 
 	if got := ResolvePath(); !filepath.IsAbs(got) {
 		t.Errorf("ResolvePath() = %q, want an absolute path", got)
+	}
+}
+
+// TestLoadResolvesUploadPathAgainstConfigDir 验证相对的 upload.path 以配置文件所在目录为基准，
+// 而不是工作目录：否则从快捷方式或计划任务启动时，上传的文件会落到工作目录（可能是 C:\Windows\System32）。
+func TestLoadResolvesUploadPathAgainstConfigDir(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, configName)
+	if err := os.WriteFile(configPath, []byte(minimalConfig), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	// 换一个工作目录，模拟快捷方式/计划任务启动。
+	t.Chdir(t.TempDir())
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := filepath.Join(dir, "uploads")
+	if cfg.Upload.Path != want {
+		t.Errorf("upload.path = %q, want %q", cfg.Upload.Path, want)
+	}
+}
+
+// TestLoadKeepsAbsoluteUploadPath 验证写死的绝对路径原样保留，不因所在目录而被改写。
+func TestLoadKeepsAbsoluteUploadPath(t *testing.T) {
+	uploadDir := t.TempDir()
+	content := minimalConfig + "upload:\n  path: " + strconv.Quote(uploadDir) + "\n"
+
+	cfg, err := Load(writeTempFile(t, configName, content))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Upload.Path != uploadDir {
+		t.Errorf("upload.path = %q, want %q", cfg.Upload.Path, uploadDir)
 	}
 }

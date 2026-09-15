@@ -215,7 +215,20 @@ func Load(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, err
 	}
+	cfg.Upload.Path = resolveUploadPath(path, cfg.Upload.Path)
 	return &cfg, nil
+}
+
+// resolveUploadPath 把相对的 upload.path 解析成基于配置文件所在目录的路径。
+//
+// 不拿工作目录当基准：Windows 上从快捷方式、计划任务或服务启动时工作目录可能是任何地方，
+// 上传的文件会散落到意想不到的位置，甚至因无权限而直接失败。以配置文件为基准则
+// 「配置在哪、数据就在哪」，与 logs 目录的落点一致。
+func resolveUploadPath(configPath, uploadPath string) string {
+	if uploadPath == "" || filepath.IsAbs(uploadPath) {
+		return uploadPath
+	}
+	return filepath.Join(filepath.Dir(configPath), uploadPath)
 }
 
 // secretKeys 是不写进配置文件、必须由环境变量（或 .env）注入的密钥类配置。

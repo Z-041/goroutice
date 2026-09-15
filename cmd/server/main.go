@@ -84,7 +84,9 @@ func main() {
 	defer closeLog()
 
 	version = resolveVersion()
+	ensureRuntimeFiles()
 	cfg := loadConfig()
+	ensureUploadDir(cfg)
 	db, fulltext := initDatabase(cfg)
 	enforcer := initEnforcer(db)
 	jwtMgr := jwt.NewManager(cfg.JWT.Secret, cfg.JWT.AccessExpireMinutes, cfg.JWT.Issuer)
@@ -153,6 +155,26 @@ func openLogFile() (*os.File, error) {
 	}
 	//nolint:gosec // 路径由可执行文件位置推导，非外部输入
 	return os.OpenFile(filepath.Join(logDir, logFileName), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+}
+
+// ensureRuntimeFiles 在首次启动（两处都没有配置文件）时生成 config.yaml 与 .env，失败即终止。
+//
+// 生成失败意味着后面必然读不到配置，那时只会报一个更含糊的错，不如现在把原因（多半是
+// 目录不可写）连同路径一起说清楚。
+func ensureRuntimeFiles() {
+	if err := config.EnsureDefaults(); err != nil {
+		slog.Error("generate default config", "err", err)
+		os.Exit(1)
+	}
+}
+
+// ensureUploadDir 在启动时就把上传目录建出来，让用户启动完立刻能看到它。
+//
+// 只告警不中断：上传失败只该影响上传，不该拖垮整个服务；FileService 首次上传时还会再建一次。
+func ensureUploadDir(cfg *config.Config) {
+	if err := os.MkdirAll(cfg.Upload.Path, 0o750); err != nil {
+		slog.Warn("create upload directory", "path", cfg.Upload.Path, "err", err)
+	}
 }
 
 // loadConfig 加载配置文件并校验 JWT 密钥强度，失败时终止启动。

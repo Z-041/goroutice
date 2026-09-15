@@ -1,0 +1,92 @@
+# 首次启动自动生成，可直接编辑，改完重启服务即生效。
+# 密钥类配置不写在这里，由同目录的 .env 注入（见文件内注释），因此本文件可以安全地放进版本库。
+# 取值优先级：进程环境变量 > .env > 本文件 > 程序内置默认值；本文件里任意键都可用 BLOG_ 前缀覆盖。
+server:
+  port: 8080
+  mode: release # release 对外服务；排障时改成 debug 会打印更多细节
+  read_timeout: 30 # 秒，读取请求超时
+  write_timeout: 30 # 秒，写入响应超时
+  idle_timeout: 60 # 秒，空闲连接超时
+  max_body_size: 16777216 # 16MB，请求体大小上限
+  trusted_proxies: [] # 可信反向代理 IP/CIDR 列表；直连部署留空，前置 nginx 时填写代理地址
+
+database:
+  # 程序不会替你猜数据库：连不上时 logs/server.log 里会写明地址与失败原因。
+  host: 127.0.0.1
+  port: 3306
+  username: root
+  password: "" # 环境变量 BLOG_DATABASE_PASSWORD
+  dbname: blog
+  charset: utf8mb4
+  parse_time: true
+  loc: Local
+  max_idle_conns: 0 # 0 = 自动（CPU 核数）
+  max_open_conns: 0 # 0 = 自动（CPU 核数 × 4）
+  conn_max_lifetime_minutes: 0 # 0 = 自动（30 分钟）
+
+jwt:
+  secret: "" # 环境变量 BLOG_JWT_SECRET，首次启动已写入 .env；至少 16 字符，缺失或过弱时拒绝启动
+  access_expire_minutes: 15 # access token 时效（分钟）
+  refresh_expire_hours: 720 # refresh token 时效（小时，30 天）
+  issuer: "goroutice-blog"
+
+upload:
+  # 相对路径以本文件所在目录为基准（不是工作目录），保证「配置在哪、上传的文件就在哪」。
+  path: "uploads"
+  max_size: 10485760 # 10MB
+  allowed_exts: [".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg", ".pdf", ".txt", ".md", ".zip"]
+
+ratelimit:
+  rps: 5 # 认证类接口每秒放行令牌数（默认档，作用于登录/注册等）
+  burst: 10 # 认证类接口令牌桶容量（突发上限）
+  write_rps: 20 # 全量写接口每秒放行令牌数
+  write_burst: 40 # 全量写接口令牌桶容量（突发上限）
+
+security:
+  max_login_attempts: 5 # 连续登录失败次数阈值
+  login_lock_minutes: 15 # 触发锁定后锁定分钟数
+  email_verification_enabled: false # 注册后是否需要邮箱验证；配好 SMTP 后再打开
+  password_min_length: 8 # 密码最小长度
+  password_require_uppercase: false # 是否强制要求大写字母
+  password_require_special: false # 是否强制要求特殊字符
+
+smtp:
+  # 默认关闭：未配置发信账号时，验证邮件与重置邮件会打到日志里，便于本地跑通流程。
+  enabled: false # true = 使用真实 SMTP 发送
+  host: "smtp.example.com" # SMTP 服务器地址
+  port: 587 # 端口：587(STARTTLS) / 465(隐式 TLS)
+  username: "" # 发信账号，环境变量 BLOG_SMTP_USERNAME
+  password: "" # 发信密码/授权码，环境变量 BLOG_SMTP_PASSWORD
+  from: "no-reply@example.com" # 发件人邮箱
+  from_name: "Goroutice Blog" # 发件人显示名称
+  use_tls: false # true = 隐式 TLS（465 端口）；false = STARTTLS（587 端口）
+  insecure_skip_verify: false # 跳过 TLS 证书校验（仅限自建/测试 SMTP）
+
+cors:
+  allowed_origins: ["*"] # 生产环境建议改为具体域名，如 ["https://example.com"]
+
+bootstrap:
+  admin_username: admin
+  admin_password: "" # 环境变量 BLOG_BOOTSTRAP_ADMIN_PASSWORD，首次启动已写入 .env
+  admin_email: "admin@example.com"
+
+updater:
+  enabled: false # true = 启动后台自动更新轮询（Release 资产需含 checksums.txt）；替换二进制的事交给它之前请先确认备份
+  interval_minutes: 5 # 轮询间隔（分钟）
+  github_owner: "Z-041" # GitHub 主源 owner
+  github_repo: "goroutice" # GitHub 主源 repo
+  github_token: "" # 公开仓库可留空；环境变量 BLOG_UPDATER_GITHUB_TOKEN
+  gitee_owner: "" # Gitee 备用源 owner
+  gitee_repo: "" # Gitee 备用源 repo
+  gitee_token: "" # Gitee Release 接口的 access_token；环境变量 BLOG_UPDATER_GITEE_TOKEN
+
+site:
+  # 对外访问域名，仅用于生成 RSS/sitemap 中的绝对链接；对外部署必须改成真实域名。
+  base_url: "http://localhost:8080"
+  title: "Goroutice Blog" # RSS channel 标题
+  description: "Goroutice Blog" # RSS channel 描述
+  language: "zh-CN" # RSS language 字段
+
+article:
+  revision_keep: 20 # 每篇文章保留的历史修订条数，0 = 不记录修订历史
+  view_dedup_minutes: 30 # 浏览量去重窗口（分钟）：同一来源窗口内重复访问同一篇文章只计一次，0 = 使用默认值

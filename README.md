@@ -38,7 +38,9 @@
 
 ### 2. 配置
 
-复制并修改 `config.yaml`（非敏感项：端口、超时、限流、开关等），**密钥类配置不要写进该文件**，改由环境变量或 `.env` 注入：
+首次启动时若 exe 旁没有 `config.yaml`，程序会自动生成一份带注释的完整配置，以及含随机 JWT 密钥和随机初始管理员口令的 `.env`，无需手工创建。下面是手工部署时逐个字段的说明。
+
+`config.yaml` 保存非敏感项（端口、超时、限流、开关等），**密钥类配置不要写进该文件**，改由环境变量或 `.env` 注入：
 
 ```dotenv
 # .env（已在 .gitignore 中，生产环境放在 server.exe 同目录）
@@ -75,7 +77,8 @@ go build -o bin/server ./cmd/server
 
 服务默认监听 `http://localhost:8080`。首次启动时若库中还没有管理员，会用 `BLOG_BOOTSTRAP_ADMIN_PASSWORD`（环境变量或 `.env`）创建；该变量未设置则拒绝启动，以免用空口令建出管理员。
 
-> 直接使用 Release 里的 `server.exe` 时，`config.yaml` 与 `.env` 都按「可执行文件所在目录 → 当前工作目录」查找，把两个文件放在 exe 同目录即可双击运行。
+> 直接使用 Release 里的 `server.exe`：双击即可，首次启动会自动生成 `config.yaml` 与 `.env`，并建出 `logs/`、`uploads/` 目录。初始管理员口令在 `.env` 的 `BLOG_BOOTSTRAP_ADMIN_PASSWORD`，首次登录后请立即修改。
+> `config.yaml` 与 `.env` 都按「可执行文件所在目录 → 当前工作目录」查找，且**只补缺失、不覆盖已有**——升级只替换二进制，你改过的配置会原样留着。
 > 日志同时写到 stderr 与 exe 同目录的 `logs/server.log`——Windows 上双击运行时控制台窗口会随进程退出立即关闭，启动失败只有这个文件能留下线索。
 
 ### 4. 验证
