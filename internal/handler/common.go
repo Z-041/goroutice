@@ -43,16 +43,22 @@ func httpStatusForBodyError(err error) int {
 	return http.StatusBadRequest
 }
 
-// parseID 从路径参数解析 UUID，格式非法时返回 400。
+// parseID 从路径参数 id 解析 UUID，格式非法时返回 400。
 func parseID(c *gin.Context) (string, error) {
-	id := c.Param("id")
-	if id == "" {
-		return "", apperror.BadRequest("invalid id")
+	return parseUUIDParam(c, "id")
+}
+
+// parseUUIDParam 从指定路径参数解析 UUID，缺失或格式非法时返回 400。
+// 非法 ID 早于业务逻辑拦下来：让格式错误的字符串进到 SQL 里查询没有任何意义。
+func parseUUIDParam(c *gin.Context, name string) (string, error) {
+	value := c.Param(name)
+	if value == "" {
+		return "", apperror.BadRequest("invalid " + name)
 	}
-	if _, err := uuid.Parse(id); err != nil {
-		return "", apperror.BadRequest("invalid id")
+	if _, err := uuid.Parse(value); err != nil {
+		return "", apperror.BadRequest("invalid " + name)
 	}
-	return id, nil
+	return value, nil
 }
 
 // parseIDQuery 读取可选过滤参数中的 UUID：为空表示不过滤，非空但非法返回 400。

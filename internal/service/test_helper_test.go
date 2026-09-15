@@ -27,7 +27,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	// 内存数据库必须保持单连接，否则各连接间数据不可见。
 	sqlDB.SetMaxOpenConns(1)
 
-	if err := db.AutoMigrate(&model.User{}, &model.UserRole{}, &model.Category{}, &model.Tag{}, &model.Article{}, &model.File{}, &model.PermissionAudit{}, &model.RefreshToken{}, &model.EmailVerification{}, &model.PasswordReset{}); err != nil {
+	if err := db.AutoMigrate(&model.User{}, &model.UserRole{}, &model.Category{}, &model.Tag{}, &model.Article{}, &model.ArticleRevision{}, &model.File{}, &model.PermissionAudit{}, &model.RefreshToken{}, &model.EmailVerification{}, &model.PasswordReset{}); err != nil {
 		t.Fatalf("auto migrate: %v", err)
 	}
 	return db

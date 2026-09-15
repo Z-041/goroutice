@@ -18,6 +18,8 @@ type Config struct {
 	CORS      CORSConfig      `mapstructure:"cors"`
 	Bootstrap BootstrapConfig `mapstructure:"bootstrap"`
 	Updater   UpdaterConfig   `mapstructure:"updater"`
+	Site      SiteConfig      `mapstructure:"site"`
+	Article   ArticleConfig   `mapstructure:"article"`
 }
 
 // ServerConfig HTTP 服务配置。
@@ -115,6 +117,27 @@ type UpdaterConfig struct {
 	GiteeOwner      string `mapstructure:"gitee_owner"`
 	GiteeRepo       string `mapstructure:"gitee_repo"`
 	GiteeToken      string `mapstructure:"gitee_token"`
+}
+
+// SiteConfig 站点元信息。
+//
+// RSS 与站点地图里的链接必须是绝对地址，而服务端只知道自己的监听端口，
+// 不知道对外域名，因此站点域名必须显式配置，否则订阅源里会写出一堆
+// 读者点不开的 localhost 链接。
+type SiteConfig struct {
+	BaseURL string `mapstructure:"base_url"`
+	Title   string `mapstructure:"title"`
+	// Description 用于 RSS channel 描述与站点地图的辅助信息。
+	Description string `mapstructure:"description"`
+	// Language 是 RSS 的 language 字段（如 zh-CN、en-US）。
+	Language string `mapstructure:"language"`
+}
+
+// ArticleConfig 文章内容策略。
+type ArticleConfig struct {
+	// RevisionKeep 是每篇文章保留的历史修订条数，超出后从最旧的开始删除。
+	// 设为 0 表示不记录修订历史。
+	RevisionKeep int `mapstructure:"revision_keep"`
 }
 
 // Load 从指定配置文件加载配置。
@@ -233,4 +256,12 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("updater.gitee_owner", "")
 	v.SetDefault("updater.gitee_repo", "")
 	v.SetDefault("updater.gitee_token", "")
+
+	// 默认值只保证本机开发可用；对外部署必须改成真实域名，否则 RSS/sitemap 里的链接不可用。
+	v.SetDefault("site.base_url", "http://localhost:8080")
+	v.SetDefault("site.title", "Goroutice Blog")
+	v.SetDefault("site.description", "Goroutice Blog")
+	v.SetDefault("site.language", "zh-CN")
+
+	v.SetDefault("article.revision_keep", 20)
 }

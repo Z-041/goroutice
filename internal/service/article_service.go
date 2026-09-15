@@ -20,11 +20,26 @@ type ArticleService struct {
 	articleRepo  *repository.ArticleRepository
 	categoryRepo *repository.CategoryRepository
 	tagRepo      *repository.TagRepository
+	revisionRepo *repository.ArticleRevisionRepository
+	// revisionKeep 是每篇文章保留的历史修订条数，<= 0 表示不记录修订。
+	revisionKeep int
 }
 
-// NewArticleService 构造 ArticleService。
-func NewArticleService(articleRepo *repository.ArticleRepository, categoryRepo *repository.CategoryRepository, tagRepo *repository.TagRepository) *ArticleService {
-	return &ArticleService{articleRepo: articleRepo, categoryRepo: categoryRepo, tagRepo: tagRepo}
+// NewArticleService 构造 ArticleService，revisionKeep 为每篇文章保留的修订条数。
+func NewArticleService(
+	articleRepo *repository.ArticleRepository,
+	categoryRepo *repository.CategoryRepository,
+	tagRepo *repository.TagRepository,
+	revisionRepo *repository.ArticleRevisionRepository,
+	revisionKeep int,
+) *ArticleService {
+	return &ArticleService{
+		articleRepo:  articleRepo,
+		categoryRepo: categoryRepo,
+		tagRepo:      tagRepo,
+		revisionRepo: revisionRepo,
+		revisionKeep: revisionKeep,
+	}
 }
 
 // Create 创建文章。
@@ -95,6 +110,69 @@ func (s *ArticleService) Create(authorID string, req dto.ArticleRequest) (*dto.A
 
 // Update 更新文章，仅作者本人或管理员可操作。
 func (s *ArticleService) Update(userID string, roles []string, id string, req dto.ArticleRequest) (*dto.ArticleInfo, error) {
+	a, err := s.loadForWrite(userID, roles, id)
+	if err != nil {
+		return nil, err
+	}
+	return s.applyUpdate(a, userID, req)
+}
+
+// RestoreRevision 把文章回滚到指定修订，仅作者本人或管理员可操作。
+// 回滚前会先按当前内容写一条修订，因此回滚本身同样可以被再回滚。
+func (s *ArticleService) RestoreRevision(userID string, roles []string, articleID, revisionID string) (*dto.ArticleInfo, error) {
+	a, err := s.loadForWrite(userID, roles, articleID)
+	if err != nil {
+		return nil, err
+	}
+
+	rev, err := s.loadOwnedRevision(articleID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+
+	return s.applyUpdate(a, userID, dto.ArticleRequest{
+		Title:      rev.Title,
+		Slug:       rev.Slug,
+		Summary:    rev.Summary,
+		Content:    rev.Content,
+		CoverImage: rev.CoverImage,
+		Status:     rev.Status,
+		CategoryID: rev.CategoryID,
+		TagIDs:     rev.TagIDList(),
+	})
+}
+
+// ListRevisions 分页查询某篇文章的修订历史，仅作者本人或管理员可操作。
+func (s *ArticleService) ListRevisions(userID string, roles []string, articleID string, page, size int) ([]dto.ArticleRevisionSummary, int64, error) {
+	if _, err := s.loadForWrite(userID, roles, articleID); err != nil {
+		return nil, 0, err
+	}
+
+	revisions, total, err := s.revisionRepo.List(articleID, page, size)
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]dto.ArticleRevisionSummary, 0, len(revisions))
+	for i := range revisions {
+		out = append(out, *dto.ToArticleRevisionSummary(&revisions[i]))
+	}
+	return out, total, nil
+}
+
+// GetRevision 获取单条修订详情（含正文），仅作者本人或管理员可操作。
+func (s *ArticleService) GetRevision(userID string, roles []string, articleID, revisionID string) (*dto.ArticleRevisionInfo, error) {
+	if _, err := s.loadForWrite(userID, roles, articleID); err != nil {
+		return nil, err
+	}
+	rev, err := s.loadOwnedRevision(articleID, revisionID)
+	if err != nil {
+		return nil, err
+	}
+	return dto.ToArticleRevisionInfo(rev), nil
+}
+
+// loadForWrite 载入文章并校验写权限（作者本人或管理员）。
+func (s *ArticleService) loadForWrite(userID string, roles []string, id string) (*model.Article, error) {
 	a, err := s.articleRepo.GetByID(id)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -105,7 +183,32 @@ func (s *ArticleService) Update(userID string, roles []string, id string, req dt
 	if !slices.Contains(roles, model.RoleAdmin) && a.AuthorID != userID {
 		return nil, apperror.Forbidden("you can only modify your own articles")
 	}
+	return a, nil
+}
 
+// loadOwnedRevision 载入修订并确认它属于指定文章。
+// 归属校验不能省：只按修订 ID 查询的话，知道任意修订 ID 就能把它的内容灌进自己的文章。
+func (s *ArticleService) loadOwnedRevision(articleID, revisionID string) (*model.ArticleRevision, error) {
+	rev, err := s.revisionRepo.GetByID(revisionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, apperror.NotFound("revision not found")
+		}
+		return nil, err
+	}
+	if rev.ArticleID != articleID {
+		return nil, apperror.NotFound("revision not found")
+	}
+	return rev, nil
+}
+
+// applyUpdate 校验并施加变更，把「更新前」的状态存为一条修订后落库。
+func (s *ArticleService) applyUpdate(a *model.Article, editorID string, req dto.ArticleRequest) (*dto.ArticleInfo, error) {
+	// 快照必须在下面就地改写 a 之前抓取，否则记下来的就是更新后的内容，
+	// 修订历史会退化成「保存即等于当前版本」，失去回溯意义。
+	rev := s.newRevision(a, editorID)
+
+	var err error
 	if a.CategoryID, err = s.resolveCategory(req.CategoryID); err != nil {
 		return nil, err
 	}
@@ -121,14 +224,24 @@ func (s *ArticleService) Update(userID string, roles []string, id string, req dt
 	a.CoverImage = req.CoverImage
 	s.applyStatus(a, req.Status)
 
-	if err := s.resolveSlugForUpdate(a, req.Slug, id); err != nil {
+	if err := s.resolveSlugForUpdate(a, req.Slug, a.ID); err != nil {
 		return nil, err
 	}
 
-	if err := s.articleRepo.Update(a, tagIDs); err != nil {
+	if err := s.articleRepo.Update(a, tagIDs, rev, s.revisionKeep); err != nil {
 		return nil, err
 	}
 	return s.getByID(a.ID)
+}
+
+// newRevision 抓取文章当前状态的修订快照；未启用修订（revisionKeep <= 0）时返回 nil。
+func (s *ArticleService) newRevision(a *model.Article, editorID string) *model.ArticleRevision {
+	if s.revisionKeep <= 0 {
+		return nil
+	}
+	rev := &model.ArticleRevision{EditorID: editorID}
+	rev.SnapshotFrom(a)
+	return rev
 }
 
 // resolveCategory 校验分类存在并返回其 ID，空值返回空串。

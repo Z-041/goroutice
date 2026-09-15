@@ -14,6 +14,7 @@
 - [公开内容](#公开内容)
 - [需登录接口](#需登录接口)
 - [管理员接口](#管理员接口)
+- [订阅与站点文件](#订阅与站点文件)
 - [静态资源](#静态资源)
 - [数据模型与枚举](#数据模型与枚举)
 - [前端对接注意事项](#前端对接注意事项)
@@ -162,11 +163,13 @@ Authorization: Bearer <access_token>
 | `/api/v1/articles` | POST | `author` | — |
 | `/api/v1/articles/:id` | PUT / DELETE | `author` | 仅作者本人或 `admin` |
 | `/api/v1/me/articles`、`/me/articles/:id` | GET | `author` | 仅本人文章；`admin` 可查任意 |
+| `/api/v1/me/articles/:id/revisions(/:revisionId)` | GET | `author` | 仅本人文章；`admin` 可查任意 |
+| `/api/v1/me/articles/:id/revisions/:revisionId/restore` | POST | `author` | 仅本人文章；`admin` 可操作任意 |
 | `/api/v1/files` | POST / GET | `author` | GET 非 `admin` 仅返回本人文件 |
 | `/api/v1/files/:id` | DELETE | `author` | 仅上传者本人或 `admin` |
 | `/api/v1/admin/**` | 全部 | `admin` | 路径前缀匹配 |
 
-公开接口（无需令牌）：`/health/*`、`/uploads/*`、`GET /api/v1/categories(/:id)`、`GET /api/v1/tags(/:id)`、`GET /api/v1/articles(/:key)`。
+公开接口（无需令牌）：`/health/*`、`/uploads/*`、`/feed.xml`、`/sitemap.xml`、`/robots.txt`、`GET /api/v1/categories(/:id)`、`GET /api/v1/tags(/:id)`、`GET /api/v1/articles(/:key)`。
 
 鉴权失败顺序：未带/无效令牌 → `401`；令牌合法但角色不匹配 → `403 forbidden`。
 
@@ -641,9 +644,13 @@ Authorization: Bearer <access_token>
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | `page` / `size` | int | 分页 |
-| `keyword` | string | 按标题/摘要/正文模糊搜索 |
+| `keyword` | string | 按标题/摘要/正文检索（见下） |
 | `category_id` | string | 按分类过滤 |
 | `tag_id` | string | 按标签过滤 |
+
+> **检索语义**：关键词先被归一化——只保留字母/数字（含中文），按非字母数字字符切词，去重、单 term 最长 32 字符、最多取 8 个 term，词之间为「同时命中」的 AND 语义。例如 `go 并发` 与 `go, 并发` 等价。
+> 数据库存在 `ft_article` 全文索引（MySQL 需 `ngram` 解析器）时走 `MATCH ... AGAINST`；此时若关键词不含任何有效 term（如仅输入 `%`、`+`），直接返回空列表，而不是命中全部文章。
+> 无全文索引时回退为 `LIKE` 子串匹配，`%`、`_`、`\` 会被转义为字面量（不会退化成通配符）。
 
 **排序**：`is_pinned DESC, is_featured DESC, created_at DESC`。
 
@@ -854,6 +861,66 @@ Authorization: Bearer <access_token>
 ```
 
 **常见错误**：`404 article not found`、`403 you can only delete your own articles`。
+
+### GET `/api/v1/me/articles/:id/revisions`
+
+分页查询某篇文章的修订历史（作者本人或 `admin`），按 `version` 倒序。
+
+**查询参数**：`page`、`size`。
+
+**响应（200）**
+
+```json
+{
+  "code": 0,
+  "message": "success",
+  "data": {
+    "list": [
+      {
+        "id": "uuid",
+        "article_id": "uuid",
+        "editor_id": "uuid",
+        "version": 3,
+        "title": "文章标题",
+        "slug": "article-slug",
+        "status": "published",
+        "created_at": "2026-09-13T12:00:00+08:00"
+      }
+    ],
+    "total": 1,
+    "page": 1,
+    "size": 10
+  }
+}
+```
+
+> 列表**不含正文**（`content`），只用于展示版本时间线。
+> 每篇文章最多保留 `article.revision_keep` 条（默认 20），超出部分在写入时按 `version` 从小到大裁剪。
+
+**常见错误**：`404 article not found`、`403 you can only modify your own articles`。
+
+### GET `/api/v1/me/articles/:id/revisions/:revisionId`
+
+修订详情（含正文），作者本人或 `admin`。
+
+**响应（200）**：`data` 为修订详情对象（含 `summary`、`content`、`cover_image`、`category_id`、`tag_ids`）。
+
+**常见错误**：`404 article not found`、`404 revision not found`、`403 you can only modify your own articles`。
+
+> 修订 ID 必须**属于该文章**，否则同样返回 `404 revision not found`（避免用任意修订 ID 读取他人内容）。
+
+### POST `/api/v1/me/articles/:id/revisions/:revisionId/restore`
+
+把文章回滚到指定修订（作者本人或 `admin`）。无请求体。
+
+> 回滚本身也会写入一条修订（记录回滚前的内容），因此**回滚可以被再次回滚**。
+> 回滚会连同 `title`、`slug`、`summary`、`content`、`cover_image`、`status`、`category_id`、`tag_ids` 一起恢复为快照内容。
+
+**响应（200）**：`data` 为回滚后的文章详情对象。
+
+**副作用**：写入审计日志 `article_restore`（`article=<slug> revision=<revisionId>`）。
+
+**常见错误**：`404 article not found`、`404 revision not found`、`403 you can only modify your own articles`。
 
 ---
 
@@ -1261,6 +1328,38 @@ Authorization: Bearer <access_token>
 
 ---
 
+## 订阅与站点文件
+
+以下三个路径挂在**根路径**（不在 `/api` 下），无需鉴权、内容仅来自已发布文章。RSS 阅读器与搜索引擎爬虫按约定到根目录找这些文件，因此路径不可配置化到 `/api/v1`。
+
+三者均返回 `Cache-Control: public, max-age=600`。
+
+### GET `/feed.xml`
+
+站点订阅源（RSS 2.0）。
+
+- `Content-Type`：`application/rss+xml; charset=utf-8`。
+- 输出最近 **20** 篇已发布文章，按公开列表排序。
+- `channel.title` / `channel.description` / `channel.language` 取自 `site.*` 配置，`channel.link` 为 `site.base_url`。
+- 每个 `item`：`link` 与 `guid` 均为 `{site.base_url}/articles/{slug}`，`description` 为文章**摘要**（正文是 Markdown 源文，服务端不渲染 HTML，因此不放进订阅源），`pubDate` 取 `published_at`（缺失时回退 `created_at`）。
+
+### GET `/sitemap.xml`
+
+站点地图。
+
+- `Content-Type`：`application/xml; charset=utf-8`。
+- 第一项固定为站点首页 `{site.base_url}/`，随后是已发布文章（最多 **1000** 篇），文章 `lastmod` 取 `updated_at`（`YYYY-MM-DD`）。
+
+### GET `/robots.txt`
+
+- `Content-Type`：`text/plain; charset=utf-8`。
+- 内容固定为 `Allow: /` + `Disallow: /api/` + `Sitemap: {site.base_url}/sitemap.xml`。
+- **不**屏蔽 `/uploads`：上传目录里是文章配图，屏蔽会让图片从搜索结果中消失。
+
+> `site.base_url` 用于拼接上述绝对地址，配置需与前端实际访问域名一致，否则订阅源里的链接会指向错误主机。
+
+---
+
 ## 静态资源
 
 ### GET `/uploads/:filename`
@@ -1333,6 +1432,27 @@ Authorization: Bearer <access_token>
 | `author` | object \| 缺省 | 作者对象（`roles` 为 `null`） |
 | `published_at` | string \| 缺省 | 首次发布时间（草稿无此字段） |
 | `created_at` / `updated_at` | string | 创建/更新时间 |
+
+### 文章修订对象（ArticleRevisionSummary / ArticleRevisionInfo）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | string | 修订 ID（UUID） |
+| `article_id` | string | 所属文章 ID |
+| `editor_id` | string | 触发本次修订的操作者 ID |
+| `version` | int | 版本号，同文章内自增（从 1 开始） |
+| `title` | string | 该版本的标题 |
+| `slug` | string | 该版本的 slug |
+| `status` | string | 该版本的状态 |
+| `created_at` | string | 修订写入时间 |
+| `summary` | string | 该版本摘要（仅详情） |
+| `content` | string | 该版本正文（仅详情） |
+| `cover_image` | string | 该版本封面 URL（仅详情） |
+| `category_id` | string | 该版本分类 ID（仅详情） |
+| `tag_ids` | []string | 该版本标签 ID 数组（仅详情） |
+
+> 修订保存的是**某次更新发生前的文章快照**（整份存储，非 diff），因此列表里版本号最大的那条 = 当前内容的上一版。
+> 修订在文章创建时不产生，仅在 `PUT /api/v1/articles/:id` 与回滚接口中被写入。
 
 ### 分类（CategoryInfo）
 
@@ -1422,3 +1542,7 @@ Authorization: Bearer <access_token>
    > 升级后**升级前已发出、尚未使用的验证/重置链接会全部失效**（提示 `invalid token`），用户重新申请一次即可；已经使用过的令牌不受影响。
 9. **密钥类配置改由环境变量/`.env` 注入**：`config.yaml` 中 `database.password`、`jwt.secret`、`smtp.username/password`、`bootstrap.admin_password` 已留空。
    > 升级时必须先设置 `BLOG_DATABASE_PASSWORD`、`BLOG_JWT_SECRET` 等环境变量（或在与 `config.yaml` 同目录、exe 同目录放置 `.env`），否则：`jwt.secret` 缺失会**拒绝启动**；首个管理员尚不存在时 `BLOG_BOOTSTRAP_ADMIN_PASSWORD` 缺失也会拒绝启动。详见 [配置说明](配置说明.md)。
+10. **文章检索语义变更**：`keyword` 现在先归一化再检索（切词、去重、最多 8 个 term 且全部命中），`%`、`_`、`+`、`-` 等字符不再具备通配/运算符含义。
+    > 此前 `keyword=%` 会命中全部文章、`a-b` 会变成「含 a 且不含 b」。现在：有全文索引时前者返回空列表、后者按两个词的 AND 处理；无全文索引（`LIKE` 回退）时前者按字面 `%` 做子串匹配。前端若依赖旧行为需调整。
+11. **新增 `article_revisions` 表与 `ft_article` 全文索引**：迁移随启动自动完成，无需手工建表；MySQL 需 8.0+，`ft_article` 创建失败（如账号无 `ALTER` 权限）只记录警告并降级为 `LIKE` 检索。
+12. **新增根路径 `/feed.xml`、`/sitemap.xml`、`/robots.txt`**：无需鉴权，内容取自已发布文章。升级后请把 `site.base_url` 改为真实对外域名，否则订阅源与站点地图里的链接会指向 `http://localhost:8080`。

@@ -66,7 +66,7 @@ func TestCategoryService_DeleteInUse(t *testing.T) {
 	cat, _ := svc.Create(dto.CategoryRequest{Name: "Go"})
 
 	author := createTestUser(t, db, "author", model.RoleAuthor)
-	if err := repository.NewArticleRepository(db).Create(&model.Article{
+	if err := repository.NewArticleRepository(db, false).Create(&model.Article{
 		Title: "Post", Slug: "post", Content: "body", AuthorID: author.ID, CategoryID: cat.ID,
 	}, nil); err != nil {
 		t.Fatalf("create article: %v", err)

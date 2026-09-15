@@ -137,6 +137,7 @@ func toAuthorInfo(u *model.User) *UserInfo {
 	return info
 }
 
+// toTagInfos 将标签模型切片转换为响应结构，空切片返回 nil。
 func toTagInfos(tags []model.Tag) []TagInfo {
 	if len(tags) == 0 {
 		return nil
@@ -146,4 +147,58 @@ func toTagInfos(tags []model.Tag) []TagInfo {
 		out = append(out, *ToTagInfo(&tags[i]))
 	}
 	return out
+}
+
+// ArticleRevisionSummary 修订列表项（不含正文）。
+type ArticleRevisionSummary struct {
+	ID        string    `json:"id"`
+	ArticleID string    `json:"article_id"`
+	EditorID  string    `json:"editor_id"`
+	Version   int       `json:"version"`
+	Title     string    `json:"title"`
+	Slug      string    `json:"slug"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ArticleRevisionInfo 修订详情（含正文），字段与 ArticleRequest 对齐，可直接用于回溯。
+type ArticleRevisionInfo struct {
+	ArticleRevisionSummary
+	Summary    string   `json:"summary"`
+	Content    string   `json:"content"`
+	CoverImage string   `json:"cover_image"`
+	CategoryID string   `json:"category_id"`
+	TagIDs     []string `json:"tag_ids"`
+}
+
+// ToArticleRevisionSummary 将修订模型转换为列表项。
+func ToArticleRevisionSummary(r *model.ArticleRevision) *ArticleRevisionSummary {
+	if r == nil {
+		return nil
+	}
+	return &ArticleRevisionSummary{
+		ID:        r.ID,
+		ArticleID: r.ArticleID,
+		EditorID:  r.EditorID,
+		Version:   r.Version,
+		Title:     r.Title,
+		Slug:      r.Slug,
+		Status:    r.Status,
+		CreatedAt: r.CreatedAt,
+	}
+}
+
+// ToArticleRevisionInfo 将修订模型转换为详情。
+func ToArticleRevisionInfo(r *model.ArticleRevision) *ArticleRevisionInfo {
+	if r == nil {
+		return nil
+	}
+	return &ArticleRevisionInfo{
+		ArticleRevisionSummary: *ToArticleRevisionSummary(r),
+		Summary:                r.Summary,
+		Content:                r.Content,
+		CoverImage:             r.CoverImage,
+		CategoryID:             r.CategoryID,
+		TagIDs:                 r.TagIDList(),
+	}
 }

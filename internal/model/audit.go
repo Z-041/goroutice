@@ -33,6 +33,7 @@ const (
 	AuditArticleDelete  = "article_delete"
 	AuditArticleStatus  = "article_status"
 	AuditArticleFeature = "article_feature"
+	AuditArticleRestore = "article_restore"
 	AuditFileUpload     = "file_upload"
 	AuditFileDelete     = "file_delete"
 )

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"goroutice/internal/model"
+	"goroutice/internal/pkg/search"
 
 	"gorm.io/gorm"
 )
@@ -20,11 +21,15 @@ type ArticleFilter struct {
 // ArticleRepository 文章数据访问。
 type ArticleRepository struct {
 	db *gorm.DB
+	// fulltext 表示数据库已具备文章全文索引，关键词检索走 MATCH ... AGAINST；
+	// 否则退回 LIKE。是否可用由 database.EnsureArticleFulltextIndex 在启动时探测后注入：
+	// 驱动是 MySQL 但没有索引时，MATCH 会直接报错而不是降级，因此不能自行按驱动名判断。
+	fulltext bool
 }
 
-// NewArticleRepository 构造 ArticleRepository。
-func NewArticleRepository(db *gorm.DB) *ArticleRepository {
-	return &ArticleRepository{db: db}
+// NewArticleRepository 构造 ArticleRepository，fulltext 表示全文索引是否可用。
+func NewArticleRepository(db *gorm.DB, fulltext bool) *ArticleRepository {
+	return &ArticleRepository{db: db, fulltext: fulltext}
 }
 
 // Create 在事务中创建文章并绑定标签。
@@ -44,7 +49,11 @@ func (r *ArticleRepository) Create(a *model.Article, tagIDs []string) error {
 
 // Update 在事务中更新文章可变字段并重建标签关联。
 // 只写入白名单列，避免全字段回写覆盖并发自增的 view_count 与不可变的 created_at。
-func (r *ArticleRepository) Update(a *model.Article, tagIDs []string) error {
+//
+// rev 非空时在同一事务内追加一条修订快照，并裁剪该文章的历史到 keepRevisions 条以内。
+// 快照与正文更新必须同事务：分两次写会出现「正文已改但历史没记」的静默丢档，
+// 而丢档恰恰是修订功能唯一要避免的事。
+func (r *ArticleRepository) Update(a *model.Article, tagIDs []string, rev *model.ArticleRevision, keepRevisions int) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		updates := map[string]any{
 			"title":        a.Title,
@@ -60,15 +69,51 @@ func (r *ArticleRepository) Update(a *model.Article, tagIDs []string) error {
 		if err := tx.Model(&model.Article{}).Where("id = ?", a.ID).Updates(updates).Error; err != nil {
 			return err
 		}
-		return replaceTags(tx, a, tagIDs)
+		if err := replaceTags(tx, a, tagIDs); err != nil {
+			return err
+		}
+		if rev == nil {
+			return nil
+		}
+		if err := appendRevision(tx, rev, keepRevisions); err != nil {
+			return err
+		}
+		return nil
 	})
 }
 
-// Delete 软删除文章，并清理标签关联记录。
-// 关联表没有软删除列，不清理会在表里长期堆积指向已删除文章的孤儿行。
+// appendRevision 在事务内追加一条修订快照并裁剪历史。
+// 版本号取「当前最大版本 + 1」而不是在应用层缓存计数：并发保存同一篇文章时，
+// 应用层计数会算出重复版本号，而这里由数据库的行锁串行化。
+func appendRevision(tx *gorm.DB, rev *model.ArticleRevision, keepRevisions int) error {
+	var maxVersion int
+	if err := tx.Model(&model.ArticleRevision{}).
+		Where("article_id = ?", rev.ArticleID).
+		Select("COALESCE(MAX(version), 0)").
+		Scan(&maxVersion).Error; err != nil {
+		return err
+	}
+	rev.Version = maxVersion + 1
+	if err := tx.Create(rev).Error; err != nil {
+		return err
+	}
+	if keepRevisions <= 0 {
+		return nil
+	}
+	// 只保留最新的 keepRevisions 条，即版本号大于 max-keep 的那些。
+	return tx.Where("article_id = ? AND version <= ?", rev.ArticleID, rev.Version-keepRevisions).
+		Delete(&model.ArticleRevision{}).Error
+}
+
+// Delete 软删除文章，并清理标签关联与修订记录。
+// 关联表与修订表都没有软删除列，不清理会在表里长期堆积指向已删除文章的孤儿行。
 func (r *ArticleRepository) Delete(id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Exec("DELETE FROM article_tags WHERE article_id = ?", id).Error; err != nil {
+			return err
+		}
+		// 文章被删除后不再提供回溯入口，历史修订留着既无用途又要一直占用正文副本。
+		if err := tx.Exec("DELETE FROM article_revisions WHERE article_id = ?", id).Error; err != nil {
 			return err
 		}
 		return tx.Where("id = ?", id).Delete(&model.Article{}).Error
@@ -104,8 +149,12 @@ func (r *ArticleRepository) List(page, size int, f ArticleFilter) ([]model.Artic
 		q = q.Where("author_id = ?", f.AuthorID)
 	}
 	if f.Keyword != "" {
-		kw := "%" + f.Keyword + "%"
-		q = q.Where("title LIKE ? OR summary LIKE ? OR content LIKE ?", kw, kw, kw)
+		var searchable bool
+		if q, searchable = r.applyKeyword(q, f.Keyword); !searchable {
+			// 关键词里没有任何可检索的字符（例如全是标点）。返回空集而不是跳过过滤：
+			// 后者会让一次无效搜索看起来像「搜到了全部文章」，比返回空更让人困惑。
+			return []model.Article{}, 0, nil
+		}
 	}
 	if f.TagID != "" {
 		sub := r.db.Table("article_tags").Select("article_id").Where("tag_id = ?", f.TagID)
@@ -120,6 +169,29 @@ func (r *ArticleRepository) List(page, size int, f ArticleFilter) ([]model.Artic
 	var articles []model.Article
 	err := q.Order("is_pinned DESC, is_featured DESC, created_at DESC").Offset((page - 1) * size).Limit(size).Find(&articles).Error
 	return articles, total, err
+}
+
+// applyKeyword 对查询施加关键词过滤，第二个返回值表示该关键词是否可用于检索。
+//
+// 两条路径的语义差异是有意为之：全文索引走「按词 AND」，LIKE 走「整串子串匹配」。
+// 前者才是检索该有的样子（搜「Go 并发」不该返回只提到 Go 的文章），
+// 但 SQLite 没有 FULLTEXT，测试环境只能退回子串匹配。
+func (r *ArticleRepository) applyKeyword(q *gorm.DB, keyword string) (*gorm.DB, bool) {
+	if r.fulltext {
+		query := search.BooleanQuery(search.Terms(keyword))
+		if query == "" {
+			return q, false
+		}
+		return q.Where("MATCH(title, summary, content) AGAINST (? IN BOOLEAN MODE)", query), true
+	}
+
+	pattern := search.LikePattern(keyword)
+	// ESCAPE 必须显式声明：SQLite 没有默认转义符，靠 MySQL 的 `\` 默认行为会导致
+	// 同一个关键词在两个环境下语义不同。
+	return q.Where(
+		`(title LIKE ? ESCAPE '\' OR summary LIKE ? ESCAPE '\' OR content LIKE ? ESCAPE '\')`,
+		pattern, pattern, pattern,
+	), true
 }
 
 // IncrementView 文章浏览数自增。

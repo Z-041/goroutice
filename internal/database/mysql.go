@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"runtime"
+	"strings"
 	"time"
 
 	"goroutice/internal/config"
@@ -75,12 +76,61 @@ func AutoMigrate(db *gorm.DB) error {
 		&model.Category{},
 		&model.Tag{},
 		&model.Article{},
+		&model.ArticleRevision{},
 		&model.File{},
 		&model.PermissionAudit{},
 		&model.RefreshToken{},
 		&model.EmailVerification{},
 		&model.PasswordReset{},
 	)
+}
+
+// fulltextIndexName 是文章表全文索引的名字，建索引与探测都以它为准。
+const fulltextIndexName = "ft_article"
+
+// articleFulltextColumns 必须与 ArticleRepository 里 MATCH(...) 的列完全一致：
+// MySQL 要求 FULLTEXT 索引的列集合与 MATCH 参数完全匹配，否则直接报 1191 错误，
+// 检索接口会从「慢」变成「500」。
+var articleFulltextColumns = []string{"title", "summary", "content"}
+
+// EnsureArticleFulltextIndex 确保文章表存在可用的全文索引，返回索引是否可用于检索。
+//
+// 两处刻意的选择：
+//   - 用 ngram 解析器而非默认解析器。默认解析器按空格/标点分词，中文正文会被切成
+//     一整段巨型 token，导致搜任何中文词都命中不了；
+//   - 建索引失败不阻断启动，只降级为 LIKE 检索。数据库账号没有 ALTER 权限、
+//     存储引擎不支持全文索引等情况下，检索会变慢但结果依然正确，比服务起不来更可取。
+//
+// 索引是否可用必须由这里探测后注入仓储层，不能只在仓储层按「驱动是不是 MySQL」判断：
+// 驱动是 MySQL 但索引不存在时，MATCH 会直接报错。
+func EnsureArticleFulltextIndex(db *gorm.DB) bool {
+	if db.Dialector.Name() != "mysql" {
+		// 测试用的 SQLite 没有 MySQL 的全文检索语法，检索走 LIKE 回退路径。
+		return false
+	}
+
+	var count int64
+	err := db.Raw(
+		`SELECT COUNT(*) FROM information_schema.STATISTICS
+		 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?`,
+		"articles", fulltextIndexName,
+	).Scan(&count).Error
+	if err != nil {
+		slog.Warn("probe fulltext index failed, falling back to LIKE search", "err", err)
+		return false
+	}
+	if count > 0 {
+		return true
+	}
+
+	stmt := fmt.Sprintf("CREATE FULLTEXT INDEX %s ON articles (%s) WITH PARSER ngram",
+		fulltextIndexName, strings.Join(articleFulltextColumns, ", "))
+	if err := db.Exec(stmt).Error; err != nil {
+		slog.Warn("create fulltext index failed, falling back to LIKE search", "err", err)
+		return false
+	}
+	slog.Info("fulltext index created for article search", "index", fulltextIndexName)
+	return true
 }
 
 // SeedAdmin 在管理员不存在时创建默认管理员账号。

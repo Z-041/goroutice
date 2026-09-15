@@ -34,7 +34,7 @@ var version = "dev"
 
 func main() {
 	cfg := loadConfig()
-	db := initDatabase(cfg)
+	db, fulltext := initDatabase(cfg)
 	enforcer := initEnforcer(db)
 	jwtMgr := jwt.NewManager(cfg.JWT.Secret, cfg.JWT.AccessExpireMinutes, cfg.JWT.Issuer)
 
@@ -45,7 +45,7 @@ func main() {
 	// 后台自动更新：定时发现新版本，校验通过后替换二进制并重启自身。
 	// 返回的实例同时供管理端查询状态与手动触发检查；未启用时为 nil。
 	autoUpdater := startAutoUpdater(ctx, cfg)
-	application := newApp(cfg, db, enforcer, jwtMgr, autoUpdater)
+	application := newApp(cfg, db, enforcer, jwtMgr, autoUpdater, fulltext)
 	application.startBackground(ctx)
 
 	engine := router.New(cfg, jwtMgr, enforcer, application.userRepo, application.handlers, application.limiter)
@@ -84,8 +84,9 @@ func loadConfig() *config.Config {
 	return cfg
 }
 
-// initDatabase 连接数据库、执行自动迁移并初始化管理员账号，失败时终止启动。
-func initDatabase(cfg *config.Config) *gorm.DB {
+// initDatabase 连接数据库、执行自动迁移、确保全文索引可用并初始化管理员账号，失败时终止启动。
+// 返回的第二个值表示文章全文索引是否可用，用于决定关键词检索走全文检索还是 LIKE 回退。
+func initDatabase(cfg *config.Config) (*gorm.DB, bool) {
 	db, err := database.NewMySQL(&cfg.Database)
 	if err != nil {
 		slog.Error("connect database", "err", err)
@@ -95,11 +96,13 @@ func initDatabase(cfg *config.Config) *gorm.DB {
 		slog.Error("auto migrate", "err", err)
 		os.Exit(1)
 	}
+	// 建索引失败只降级不中断：检索会退回 LIKE，慢但结果正确。
+	fulltext := database.EnsureArticleFulltextIndex(db)
 	if err := database.SeedAdmin(db, cfg.Bootstrap.AdminUsername, cfg.Bootstrap.AdminPassword, cfg.Bootstrap.AdminEmail); err != nil {
 		slog.Error("seed admin", "err", err)
 		os.Exit(1)
 	}
-	return db
+	return db, fulltext
 }
 
 // initEnforcer 初始化权限执行器并写入种子策略，失败时终止启动。
@@ -116,8 +119,8 @@ func initEnforcer(db *gorm.DB) *casbin.Enforcer {
 	return enforcer
 }
 
-// newApp 装配数据访问层、业务逻辑层、处理器与限流器。
-func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *jwt.Manager, autoUpdater *updater.Updater) *app {
+// newApp 装配数据访问层、业务逻辑层、处理器与限流器。fulltext 表示文章全文索引是否可用。
+func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *jwt.Manager, autoUpdater *updater.Updater, fulltext bool) *app {
 	// 数据访问层
 	userRepo := repository.NewUserRepository(db)
 	roleRepo := repository.NewUserRoleRepository(db)
@@ -126,7 +129,8 @@ func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *
 	passwordResetRepo := repository.NewPasswordResetRepository(db)
 	categoryRepo := repository.NewCategoryRepository(db)
 	tagRepo := repository.NewTagRepository(db)
-	articleRepo := repository.NewArticleRepository(db)
+	articleRepo := repository.NewArticleRepository(db, fulltext)
+	articleRevisionRepo := repository.NewArticleRevisionRepository(db)
 	fileRepo := repository.NewFileRepository(db)
 	auditRepo := repository.NewPermissionAuditRepository(db)
 
@@ -154,7 +158,7 @@ func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *
 	userService := service.NewUserService(userRepo, roleRepo)
 	categoryService := service.NewCategoryService(categoryRepo)
 	tagService := service.NewTagService(tagRepo)
-	articleService := service.NewArticleService(articleRepo, categoryRepo, tagRepo)
+	articleService := service.NewArticleService(articleRepo, categoryRepo, tagRepo, articleRevisionRepo, cfg.Article.RevisionKeep)
 	fileService := service.NewFileService(fileRepo, &cfg.Upload)
 	policyService := service.NewPolicyService(enforcer, userRepo, roleRepo, auditService)
 
@@ -177,6 +181,7 @@ func newApp(cfg *config.Config, db *gorm.DB, enforcer *casbin.Enforcer, jwtMgr *
 			Health:   handler.NewHealthHandler(db),
 			Policy:   handler.NewPolicyHandler(policyService),
 			Updater:  handler.NewUpdaterHandler(autoUpdater, version),
+			Site:     handler.NewSiteHandler(articleService, cfg.Site),
 		},
 		limiter:      limiter,
 		loginLimiter: loginLimiter,

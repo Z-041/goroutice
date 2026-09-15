@@ -81,3 +81,13 @@ updater:
   gitee_owner: "" # Gitee 备用源 owner
   gitee_repo: "" # Gitee 备用源 repo
   gitee_token: "" # Gitee Release 接口的 access_token；环境变量 BLOG_UPDATER_GITEE_TOKEN
+
+site:
+  # 对外访问域名，仅用于生成 RSS/sitemap 中的绝对链接；对外部署必须改成真实域名。
+  base_url: "http://localhost:8080"
+  title: "Goroutice Blog" # RSS channel 标题
+  description: "Goroutice Blog" # RSS channel 描述
+  language: "zh-CN" # RSS language 字段
+
+article:
+  revision_keep: 20 # 每篇文章保留的历史修订条数，0 = 不记录修订历史

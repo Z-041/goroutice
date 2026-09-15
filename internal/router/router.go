@@ -26,6 +26,7 @@ type Handlers struct {
 	Health   *handler.HealthHandler
 	Policy   *handler.PolicyHandler
 	Updater  *handler.UpdaterHandler
+	Site     *handler.SiteHandler
 }
 
 // New 构建并配置 Gin 引擎及全部路由。
@@ -59,6 +60,11 @@ func New(cfg *config.Config, jwtMgr *jwt.Manager, enforcer *casbin.Enforcer, use
 	// 健康检查
 	r.GET("/health/live", h.Health.Liveness)
 	r.GET("/health/ready", h.Health.Readiness)
+
+	// 订阅与搜索引擎索引：阅读器和爬虫按约定到根路径找这些文件，因此不挂在 /api 下。
+	r.GET("/feed.xml", h.Site.RSS)
+	r.GET("/sitemap.xml", h.Site.Sitemap)
+	r.GET("/robots.txt", h.Site.Robots)
 
 	// 上传文件静态资源
 	r.Static("/uploads", cfg.Upload.Path)
@@ -104,6 +110,9 @@ func New(cfg *config.Config, jwtMgr *jwt.Manager, enforcer *casbin.Enforcer, use
 
 		authorized.GET("/me/articles", h.Article.MineList)
 		authorized.GET("/me/articles/:id", h.Article.MineDetail)
+		authorized.GET("/me/articles/:id/revisions", h.Article.ListRevisions)
+		authorized.GET("/me/articles/:id/revisions/:revisionId", h.Article.GetRevision)
+		authorized.POST("/me/articles/:id/revisions/:revisionId/restore", h.Article.RestoreRevision)
 		authorized.POST("/articles", h.Article.Create)
 		authorized.PUT("/articles/:id", h.Article.Update)
 		authorized.DELETE("/articles/:id", h.Article.Delete)

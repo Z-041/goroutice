@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strconv"
 	"testing"
 
 	"goroutice/internal/dto"
@@ -10,10 +11,20 @@ import (
 	"gorm.io/gorm"
 )
 
+// testRevisionKeep 是测试中每篇文章保留的修订条数。取小值以便直接验证裁剪边界。
+const testRevisionKeep = 3
+
 func newArticleService(t *testing.T) (*ArticleService, *gorm.DB) {
 	t.Helper()
 	db := setupTestDB(t)
-	svc := NewArticleService(repository.NewArticleRepository(db), repository.NewCategoryRepository(db), repository.NewTagRepository(db))
+	// 第二个参数为 false：SQLite 没有 FULLTEXT，检索走 LIKE 分支。
+	svc := NewArticleService(
+		repository.NewArticleRepository(db, false),
+		repository.NewCategoryRepository(db),
+		repository.NewTagRepository(db),
+		repository.NewArticleRevisionRepository(db),
+		testRevisionKeep,
+	)
 	return svc, db
 }
 
@@ -244,5 +255,212 @@ func TestArticleService_ListPublished_PinnedFirst(t *testing.T) {
 	}
 	if items[0].ID != pinned.ID {
 		t.Fatalf("expected pinned article first, got %s", items[0].ID)
+	}
+}
+
+func TestArticleService_RevisionHistoryAndRestore(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+	roles := []string{model.RoleAuthor}
+
+	a, err := svc.Create(author.ID, dto.ArticleRequest{
+		Title: "第一版", Slug: "first", Summary: "摘要一", Content: "正文一", Status: model.ArticlePublished,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 创建阶段不产生修订：此时「当前内容」就是第一版本身，没有必要留一份完全相同的副本。
+	if _, total, _ := svc.ListRevisions(author.ID, roles, a.ID, 1, 10); total != 0 {
+		t.Fatalf("expected no revision after create, got %d", total)
+	}
+
+	if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{
+		Title: "第二版", Slug: "second", Summary: "摘要二", Content: "正文二", Status: model.ArticlePublished,
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	revisions, total, err := svc.ListRevisions(author.ID, roles, a.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	if total != 1 || len(revisions) != 1 {
+		t.Fatalf("expected 1 revision, got %d", total)
+	}
+	if revisions[0].Version != 1 {
+		t.Fatalf("expected version 1, got %d", revisions[0].Version)
+	}
+	// 修订记录的是「更新前」的状态，因此第一条修订就是第一版。
+	if revisions[0].Title != "第一版" || revisions[0].Slug != "first" {
+		t.Fatalf("revision 内容不是更新前的状态: %+v", revisions[0])
+	}
+
+	detail, err := svc.GetRevision(author.ID, roles, a.ID, revisions[0].ID)
+	if err != nil {
+		t.Fatalf("get revision: %v", err)
+	}
+	if detail.Content != "正文一" || detail.Summary != "摘要一" {
+		t.Fatalf("修订详情不完整: %+v", detail)
+	}
+
+	restored, err := svc.RestoreRevision(author.ID, roles, a.ID, revisions[0].ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if restored.Title != "第一版" || restored.Content != "正文一" || restored.Slug != "first" {
+		t.Fatalf("回滚后的内容不正确: %+v", restored)
+	}
+
+	// 回滚前会先把当前内容存成修订，因此回滚本身也可以被再回滚。
+	if _, total, _ := svc.ListRevisions(author.ID, roles, a.ID, 1, 10); total != 2 {
+		t.Fatalf("expected restore to append a revision, got %d", total)
+	}
+}
+
+func TestArticleService_RevisionKeepsTags(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+	roles := []string{model.RoleAuthor}
+	tagRepo := repository.NewTagRepository(db)
+
+	tagA := &model.Tag{Name: "Go", Slug: "go"}
+	tagB := &model.Tag{Name: "Rust", Slug: "rust"}
+	for _, tag := range []*model.Tag{tagA, tagB} {
+		if err := tagRepo.Create(tag); err != nil {
+			t.Fatalf("create tag: %v", err)
+		}
+	}
+
+	a, err := svc.Create(author.ID, dto.ArticleRequest{Title: "Post", Content: "body", TagIDs: []string{tagA.ID}})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{Title: "Post", Content: "body", TagIDs: []string{tagB.ID}}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	revisions, _, err := svc.ListRevisions(author.ID, roles, a.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	detail, err := svc.GetRevision(author.ID, roles, a.ID, revisions[0].ID)
+	if err != nil {
+		t.Fatalf("get revision: %v", err)
+	}
+	if len(detail.TagIDs) != 1 || detail.TagIDs[0] != tagA.ID {
+		t.Fatalf("修订未保存标签快照: %+v", detail.TagIDs)
+	}
+
+	restored, err := svc.RestoreRevision(author.ID, roles, a.ID, revisions[0].ID)
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if len(restored.Tags) != 1 || restored.Tags[0].ID != tagA.ID {
+		t.Fatalf("回滚未恢复标签: %+v", restored.Tags)
+	}
+}
+
+func TestArticleService_RevisionPrunedToKeep(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+	roles := []string{model.RoleAuthor}
+
+	a, err := svc.Create(author.ID, dto.ArticleRequest{Title: "Post", Content: "v0"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	// 更新次数超过保留上限，历史应被裁剪到 keep 条而不是无限增长。
+	for i := 0; i < testRevisionKeep+2; i++ {
+		if _, err := svc.Update(author.ID, roles, a.ID, dto.ArticleRequest{
+			Title: "Post", Content: "v" + strconv.Itoa(i),
+		}); err != nil {
+			t.Fatalf("update %d: %v", i, err)
+		}
+	}
+
+	revisions, total, err := svc.ListRevisions(author.ID, roles, a.ID, 1, 100)
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+	if total != testRevisionKeep {
+		t.Fatalf("expected %d revisions kept, got %d", testRevisionKeep, total)
+	}
+	// 裁剪的是最旧的版本，最新一条必须保留下来。
+	if revisions[0].Version != testRevisionKeep+2 {
+		t.Fatalf("expected newest revision version %d, got %d", testRevisionKeep+2, revisions[0].Version)
+	}
+}
+
+func TestArticleService_RevisionAccessControl(t *testing.T) {
+	svc, db := newArticleService(t)
+	authorA := createTestUser(t, db, "authorA", model.RoleAuthor)
+	authorB := createTestUser(t, db, "authorB", model.RoleAuthor)
+
+	a, _ := svc.Create(authorA.ID, dto.ArticleRequest{Title: "A's Post", Content: "v1"})
+	if _, err := svc.Update(authorA.ID, []string{model.RoleAuthor}, a.ID, dto.ArticleRequest{Title: "A's Post", Content: "v2"}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	revisions, _, err := svc.ListRevisions(authorA.ID, []string{model.RoleAuthor}, a.ID, 1, 10)
+	if err != nil {
+		t.Fatalf("list revisions: %v", err)
+	}
+
+	// 非作者既不能看历史也不能回滚
+	if _, _, err := svc.ListRevisions(authorB.ID, []string{model.RoleAuthor}, a.ID, 1, 10); err == nil {
+		t.Fatal("expected forbidden when listing others' revisions")
+	}
+	if _, err := svc.GetRevision(authorB.ID, []string{model.RoleAuthor}, a.ID, revisions[0].ID); err == nil {
+		t.Fatal("expected forbidden when reading others' revision")
+	}
+	if _, err := svc.RestoreRevision(authorB.ID, []string{model.RoleAuthor}, a.ID, revisions[0].ID); err == nil {
+		t.Fatal("expected forbidden when restoring others' revision")
+	}
+
+	// 修订必须属于目标文章：否则拿别的文章的修订 ID 就能把内容灌进来。
+	other, _ := svc.Create(authorB.ID, dto.ArticleRequest{Title: "B's Post", Content: "b1"})
+	if _, err := svc.RestoreRevision(authorB.ID, []string{model.RoleAuthor}, other.ID, revisions[0].ID); err == nil {
+		t.Fatal("expected not found for revision of another article")
+	}
+}
+
+func TestArticleService_SearchKeyword(t *testing.T) {
+	svc, db := newArticleService(t)
+	author := createTestUser(t, db, "author", model.RoleAuthor)
+
+	create := func(title, content string) {
+		t.Helper()
+		if _, err := svc.Create(author.ID, dto.ArticleRequest{Title: title, Content: content, Status: model.ArticlePublished}); err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+	}
+	create("Go 并发模式", "channel 与 goroutine")
+	create("Rust 所有权", "borrow checker")
+
+	cases := []struct {
+		name    string
+		keyword string
+		want    int64
+	}{
+		{"命中标题", "并发", 1},
+		{"命中正文", "borrow", 1},
+		{"无命中", "python", 0},
+		// `%` 若不转义会变成通配符，把「搜不到」变成「搜到全部」。
+		{"通配符不匹配全部", "%", 0},
+		{"下划线不匹配任意单字符", "_", 0},
+		{"运算符关键词无命中", "+-*", 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, total, err := svc.ListPublished(1, 10, tc.keyword, "", "")
+			if err != nil {
+				t.Fatalf("search %q: %v", tc.keyword, err)
+			}
+			if total != tc.want {
+				t.Fatalf("search %q: got %d, want %d", tc.keyword, total, tc.want)
+			}
+		})
 	}
 }

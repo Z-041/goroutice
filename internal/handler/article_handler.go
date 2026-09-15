@@ -203,3 +203,68 @@ func (h *ArticleHandler) SetFeature(c *gin.Context) {
 	auditLog(c, h.auditor, model.AuditArticleFeature, "id="+id)
 	response.Success(c, nil)
 }
+
+// ListRevisions 文章的历史修订列表。
+func (h *ArticleHandler) ListRevisions(c *gin.Context) {
+	articleID, err := parseID(c)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	pg := pagination.Parse(c.Query("page"), c.Query("size"))
+	items, total, err := h.articleService.ListRevisions(
+		middleware.CurrentUserID(c), middleware.CurrentRoles(c), articleID, pg.Page, pg.Size,
+	)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	response.Page(c, items, total, pg.Page, pg.Size)
+}
+
+// GetRevision 历史修订详情（含正文）。
+func (h *ArticleHandler) GetRevision(c *gin.Context) {
+	articleID, revisionID, ok := parseArticleRevisionIDs(c)
+	if !ok {
+		return
+	}
+
+	item, err := h.articleService.GetRevision(middleware.CurrentUserID(c), middleware.CurrentRoles(c), articleID, revisionID)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	response.Success(c, item)
+}
+
+// RestoreRevision 把文章回滚到指定修订。
+func (h *ArticleHandler) RestoreRevision(c *gin.Context) {
+	articleID, revisionID, ok := parseArticleRevisionIDs(c)
+	if !ok {
+		return
+	}
+
+	item, err := h.articleService.RestoreRevision(middleware.CurrentUserID(c), middleware.CurrentRoles(c), articleID, revisionID)
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	auditLog(c, h.auditor, model.AuditArticleRestore, "article="+item.Slug+" revision="+revisionID)
+	response.Success(c, item)
+}
+
+// parseArticleRevisionIDs 解析修订相关路由上的两个路径参数，失败时已写出响应。
+func parseArticleRevisionIDs(c *gin.Context) (articleID, revisionID string, ok bool) {
+	articleID, err := parseID(c)
+	if err != nil {
+		handleError(c, err)
+		return "", "", false
+	}
+	revisionID, err = parseUUIDParam(c, "revisionId")
+	if err != nil {
+		handleError(c, err)
+		return "", "", false
+	}
+	return articleID, revisionID, true
+}

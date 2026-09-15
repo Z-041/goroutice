@@ -80,6 +80,10 @@ func SeedPolicies(e *casbin.Enforcer) error {
 		{roleAuthor, "/api/v1/articles/:id", methodDelete},
 		{roleAuthor, "/api/v1/me/articles", methodGet},
 		{roleAuthor, "/api/v1/me/articles/:id", methodGet},
+		// 修订历史：查看与回溯都只针对自己的文章，归属再由服务层按 author_id 二次校验。
+		{roleAuthor, "/api/v1/me/articles/:id/revisions", methodGet},
+		{roleAuthor, "/api/v1/me/articles/:id/revisions/:revisionId", methodGet},
+		{roleAuthor, "/api/v1/me/articles/:id/revisions/:revisionId/restore", methodPost},
 		{roleAuthor, "/api/v1/files", methodPost},
 		{roleAuthor, "/api/v1/files", methodGet},
 		{roleAuthor, "/api/v1/files/:id", methodDelete},
