@@ -216,14 +216,25 @@ func TestArticleService_ListMine(t *testing.T) {
 		t.Fatalf("create B1: %v", err)
 	}
 
-	_, total, _ := svc.ListMine(authorA.ID, 1, 10, "")
+	_, total, _ := svc.ListMine(authorA.ID, 1, 10, "", "", "", "")
 	if total != 2 {
 		t.Fatalf("expected 2 mine, got %d", total)
 	}
 
-	_, total, _ = svc.ListMine(authorA.ID, 1, 10, model.ArticleDraft)
+	_, total, _ = svc.ListMine(authorA.ID, 1, 10, model.ArticleDraft, "", "", "")
 	if total != 1 {
 		t.Fatalf("expected 1 draft, got %d", total)
+	}
+
+	// 关键词过滤必须对作者自己的列表同样生效：前端「我的文章」上的搜索框与
+	// 管理端共用同一套查询参数，只支持 status 的话搜索会静默地什么也不做。
+	_, total, _ = svc.ListMine(authorA.ID, 1, 10, "", "A2", "", "")
+	if total != 1 {
+		t.Fatalf("expected 1 matched by keyword, got %d", total)
+	}
+	_, total, _ = svc.ListMine(authorA.ID, 1, 10, "", "B1", "", "")
+	if total != 0 {
+		t.Fatalf("keyword must not match other authors' articles, got %d", total)
 	}
 }
 

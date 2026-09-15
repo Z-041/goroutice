@@ -131,7 +131,21 @@ func (h *ArticleHandler) Delete(c *gin.Context) {
 // MineList 当前作者的文章列表（含草稿）。
 func (h *ArticleHandler) MineList(c *gin.Context) {
 	pg := pagination.Parse(c.Query("page"), c.Query("size"))
-	items, total, err := h.articleService.ListMine(middleware.CurrentUserID(c), pg.Page, pg.Size, c.Query("status"))
+	categoryID, err := parseIDQuery(c, "category_id")
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+	tagID, err := parseIDQuery(c, "tag_id")
+	if err != nil {
+		handleError(c, err)
+		return
+	}
+
+	items, total, err := h.articleService.ListMine(
+		middleware.CurrentUserID(c), pg.Page, pg.Size,
+		c.Query("status"), c.Query("keyword"), categoryID, tagID,
+	)
 	if err != nil {
 		handleError(c, err)
 		return

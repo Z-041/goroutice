@@ -379,10 +379,14 @@ func (s *ArticleService) ListPublished(page, size int, keyword string, categoryI
 }
 
 // ListMine 分页查询当前作者自己的文章（含草稿）。
-func (s *ArticleService) ListMine(userID string, page, size int, status string) ([]dto.ArticleSummary, int64, error) {
+// 过滤条件与公开列表保持一致：作者也需要在「我的文章」里搜索和按分类/标签筛选。
+func (s *ArticleService) ListMine(userID string, page, size int, status, keyword, categoryID, tagID string) ([]dto.ArticleSummary, int64, error) {
 	articles, total, err := s.articleRepo.List(page, size, repository.ArticleFilter{
-		AuthorID: userID,
-		Status:   status,
+		AuthorID:   userID,
+		Status:     status,
+		Keyword:    keyword,
+		CategoryID: categoryID,
+		TagID:      tagID,
 	})
 	if err != nil {
 		return nil, 0, err

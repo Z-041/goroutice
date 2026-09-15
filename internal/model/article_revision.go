@@ -31,10 +31,12 @@ type ArticleRevision struct {
 	TagIDs string `gorm:"size:1024" json:"tag_ids"`
 }
 
-// TagIDList 把快照里的标签 ID 串拆成切片，空串返回 nil。
+// TagIDList 把快照里的标签 ID 串拆成切片，空串返回空切片。
+// 不返回 nil：结果会直接进 JSON（tag_ids 没有 omitempty），nil 会序列化成 null，
+// 前端就得为「不是数组的空值」多写一层判断。
 func (r *ArticleRevision) TagIDList() []string {
 	if r.TagIDs == "" {
-		return nil
+		return []string{}
 	}
 	return strings.Split(r.TagIDs, tagIDSeparator)
 }

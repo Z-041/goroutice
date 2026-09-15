@@ -17,6 +17,7 @@ go.work.sum
 
 # Dependency directory
 vendor/
+goroutice-web
 
 # Local module/build cache (workaround for restricted GOMODCACHE)
 .gomod/

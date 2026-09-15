@@ -776,9 +776,18 @@ Authorization: Bearer <access_token>
 
 当前作者的文章列表（含草稿，不含他人文章）。
 
-**查询参数**：`page`、`size`、`status`（可选：`draft`/`published`/`archived`）。
+**查询参数**：`page`、`size`、`status`、`keyword`、`category_id`、`tag_id`。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| `page` / `size` | int | 分页 |
+| `status` | string | `draft`/`published`/`archived` |
+| `keyword` | string | 按标题/摘要/正文检索，语义同公开列表 |
+| `category_id` | string | 按分类过滤 |
+| `tag_id` | string | 按标签过滤 |
 
 > `status` 不做枚举校验，传非法值时按等值过滤，返回空列表。
+> 筛选条件与公开列表一致，仅把范围限定为当前作者自己的文章（含草稿）。
 
 **响应（200）**：`data.list` 为文章摘要数组，排序同公开列表。
 
